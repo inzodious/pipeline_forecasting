@@ -7,44 +7,74 @@ from datetime import datetime, timedelta
 # ==========================================
 # CONFIGURATION
 # ==========================================
+"""
+UPDATED: High-volume mock data generator for proper forecast validation.
+- 360 deals/year (~30/month) provides statistical stability
+- Realistic segment distribution and seasonality
+- Simple naming: 'Mock Deal ' + deal_id
+"""
+
 OUTPUT_DIR = "data"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "fact_snapshots.csv")
 
 FISCAL_YEARS = [2024, 2025]
-DEALS_PER_YEAR = 36
-DEALS_PER_MONTH = 3
+DEALS_PER_YEAR = 360
+DEALS_PER_MONTH = 30
 
-# 2023 Carryover Pipeline (deals created 30-90 days before 2024)
+# 2023 Carryover Pipeline
 CARRYOVER_CONFIG = {
     'enabled': True,
-    'count': 12,  # Slightly less than monthly run rate
-    'days_before_start': (30, 90),  # Created 30-90 days before Jan 1, 2024
+    'count': 45,
+    'days_before_start': (30, 120),
     'segment_distribution': {
-        'Large Market': 1,
-        'Mid Market': 4,
-        'Small Market': 7
+        'Large Market': 5,
+        'Mid Market': 15,
+        'Small Market': 25
     }
 }
 
+# Segment configuration - realistic enterprise sales mix
 SEGMENT_CONFIG = {
     'Large Market': {
-        'count_per_year': 4,
-        'revenue_min': 100000,
-        'revenue_max': 300000,
-        'win_rate': 0.15
+        'pct_of_deals': 0.10,           # 10% of deals
+        'revenue_min': 150000,
+        'revenue_max': 500000,
+        'win_rate': 0.15,               # Lower win rate, higher value
+        'dso_mean': 90,                 # Longer sales cycle
+        'dso_std': 25
     },
     'Mid Market': {
-        'count_per_year': 12,
+        'pct_of_deals': 0.35,           # 35% of deals
         'revenue_min': 50000,
-        'revenue_max': 99000,
-        'win_rate': 0.20
+        'revenue_max': 149000,
+        'win_rate': 0.22,
+        'dso_mean': 60,
+        'dso_std': 20
     },
     'Small Market': {
-        'count_per_year': 20,
-        'revenue_min': 25000,
-        'revenue_max': 49999,
-        'win_rate': 0.25
+        'pct_of_deals': 0.55,           # 55% of deals
+        'revenue_min': 15000,
+        'revenue_max': 49000,
+        'win_rate': 0.28,               # Higher win rate, lower value
+        'dso_mean': 45,                 # Shorter sales cycle
+        'dso_std': 15
     }
+}
+
+# Seasonality - monthly multipliers (Q4 heavy, Q1 slow)
+SEASONALITY = {
+    1: 0.70,    # January - slow start
+    2: 0.80,
+    3: 0.95,
+    4: 1.00,
+    5: 1.00,
+    6: 1.10,    # Q2 push
+    7: 0.85,    # Summer slowdown
+    8: 0.85,
+    9: 1.05,    # Q3 ramp
+    10: 1.15,
+    11: 1.20,   # Q4 push
+    12: 1.35    # Year-end close
 }
 
 STAGES = ['Qualified', 'Solutioning', 'Alignment']
@@ -53,43 +83,16 @@ CLOSED_LOST = 'Closed Lost'
 
 DEAL_OWNER = "Joshua Biondo"
 
-CLOSE_DAYS_MIN = 30
-CLOSE_DAYS_MAX = 90
-
-IMPL_DAYS_MIN = 60
-IMPL_DAYS_MAX = 180
-
 SNAPSHOT_INTERVAL_DAYS = 7
-
-COMPANY_PREFIXES = [
-    "Apex", "Summit", "Pinnacle", "Horizon", "Velocity", "Catalyst", "Synergy",
-    "Vertex", "Elevate", "Quantum", "Nexus", "Vanguard", "Prism", "Compass",
-    "Eclipse", "Momentum", "Phoenix", "Atlas", "Fusion", "Sterling", "Ember",
-    "Cobalt", "Crimson", "Nova", "Orion", "Titan", "Pulse", "Radiant", "Vector",
-    "Zenith", "Aurora", "Cascade", "Delta", "Epoch", "Flux", "Granite", "Helix"
-]
-
-COMPANY_SUFFIXES = [
-    "Industries", "Solutions", "Technologies", "Systems", "Group", "Corp",
-    "Enterprises", "Partners", "Holdings", "Services", "Dynamics", "Labs",
-    "Innovations", "Networks", "Ventures", "Global", "Digital", "Analytics"
-]
 
 
 # ==========================================
 # DEAL GENERATION
 # ==========================================
 
-def generate_deal_name(used_names):
-    """Generate a unique company/deal name."""
-    for _ in range(1000):
-        prefix = random.choice(COMPANY_PREFIXES)
-        suffix = random.choice(COMPANY_SUFFIXES)
-        name = f"{prefix} {suffix}"
-        if name not in used_names:
-            used_names.add(name)
-            return name
-    raise ValueError("Could not generate unique deal name")
+def generate_deal_name(deal_id):
+    """Simple unique deal name."""
+    return f"Mock Deal {deal_id}"
 
 
 def generate_deal_id(year, index):
@@ -97,37 +100,27 @@ def generate_deal_id(year, index):
     return f"DEAL-{year}-{index:04d}"
 
 
-def distribute_deals_across_months(year, segment_counts):
-    """
-    Distribute deals evenly across 12 months (3 per month).
-    Returns list of (month, segment) tuples.
-    """
-    deals_by_month = {m: [] for m in range(1, 13)}
-    
-    all_deals = []
-    for segment, count in segment_counts.items():
-        all_deals.extend([segment] * count)
-    
-    random.shuffle(all_deals)
-    
-    month = 1
-    for segment in all_deals:
-        deals_by_month[month].append(segment)
-        month = (month % 12) + 1
-    
-    result = []
-    for month in range(1, 13):
-        for segment in deals_by_month[month]:
-            result.append((month, segment))
-    
-    return result
+def get_segment_for_deal():
+    """Randomly assign segment based on distribution."""
+    r = random.random()
+    cumulative = 0
+    for segment, config in SEGMENT_CONFIG.items():
+        cumulative += config['pct_of_deals']
+        if r <= cumulative:
+            return segment
+    return 'Small Market'
 
 
-def generate_carryover_deals(deal_counter, used_names):
-    """
-    Generate deals from late 2023 that carry over into 2024.
-    These represent the open pipeline at the start of our simulation.
-    """
+def get_monthly_deal_count(base_count, month):
+    """Apply seasonality to monthly deal count."""
+    multiplier = SEASONALITY.get(month, 1.0)
+    # Add some randomness
+    adjusted = base_count * multiplier * random.uniform(0.85, 1.15)
+    return max(1, int(round(adjusted)))
+
+
+def generate_carryover_deals(deal_counter):
+    """Generate deals from late 2023 that carry over into 2024."""
     if not CARRYOVER_CONFIG.get('enabled', False):
         return [], deal_counter
     
@@ -140,15 +133,16 @@ def generate_carryover_deals(deal_counter, used_names):
         
         for _ in range(count):
             deal_id = generate_deal_id(2023, deal_counter)
-            deal_name = generate_deal_name(used_names)
+            deal_name = generate_deal_name(deal_id)
             
             days_before = random.randint(days_min, days_max)
             date_created = start_date - timedelta(days=days_before)
             
-            close_days = random.randint(CLOSE_DAYS_MIN, CLOSE_DAYS_MAX)
+            # Use segment-specific DSO
+            close_days = max(14, int(random.gauss(config['dso_mean'], config['dso_std'])))
             date_closed = date_created + timedelta(days=close_days)
             
-            impl_days = random.randint(IMPL_DAYS_MIN, IMPL_DAYS_MAX)
+            impl_days = close_days + random.randint(30, 90)
             date_implementation = date_created + timedelta(days=impl_days)
             
             revenue = random.randint(config['revenue_min'], config['revenue_max'])
@@ -174,19 +168,15 @@ def generate_carryover_deals(deal_counter, used_names):
     return carryover_deals, deal_counter
 
 
-def generate_deal(deal_id, deal_name, year, month, segment, config):
+def generate_deal(deal_id, deal_name, year, month, day, segment, config):
     """Generate a single deal with all its attributes."""
-    days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    if year % 4 == 0:
-        days_in_month[1] = 29
+    date_created = datetime(year, month, day)
     
-    create_day = random.randint(1, days_in_month[month - 1])
-    date_created = datetime(year, month, create_day)
-    
-    close_days = random.randint(CLOSE_DAYS_MIN, CLOSE_DAYS_MAX)
+    # Use segment-specific DSO distribution
+    close_days = max(14, int(random.gauss(config['dso_mean'], config['dso_std'])))
     date_closed = date_created + timedelta(days=close_days)
     
-    impl_days = random.randint(IMPL_DAYS_MIN, IMPL_DAYS_MAX)
+    impl_days = close_days + random.randint(30, 90)
     date_implementation = date_created + timedelta(days=impl_days)
     
     revenue = random.randint(config['revenue_min'], config['revenue_max'])
@@ -208,17 +198,48 @@ def generate_deal(deal_id, deal_name, year, month, segment, config):
     }
 
 
+def generate_year_deals(year, deal_counter):
+    """Generate all deals for a given year with seasonality."""
+    deals = []
+    
+    for month in range(1, 13):
+        # Get seasonality-adjusted deal count for month
+        monthly_count = get_monthly_deal_count(DEALS_PER_MONTH, month)
+        
+        # Get days in month
+        if month == 12:
+            next_month = datetime(year + 1, 1, 1)
+        else:
+            next_month = datetime(year, month + 1, 1)
+        days_in_month = (next_month - datetime(year, month, 1)).days
+        
+        for _ in range(monthly_count):
+            segment = get_segment_for_deal()
+            config = SEGMENT_CONFIG[segment]
+            
+            deal_id = generate_deal_id(year, deal_counter)
+            deal_name = generate_deal_name(deal_id)
+            
+            # Random day within month
+            day = random.randint(1, days_in_month)
+            
+            deal = generate_deal(deal_id, deal_name, year, month, day, segment, config)
+            deals.append(deal)
+            
+            deal_counter += 1
+    
+    return deals, deal_counter
+
+
 # ==========================================
 # SNAPSHOT SIMULATION
 # ==========================================
 
 def calculate_stage_transitions(deal):
-    """
-    Calculate when a deal transitions through each stage.
-    Stages: Qualified -> Solutioning -> Alignment -> Closed Won/Lost
-    """
+    """Calculate when a deal transitions through each stage."""
     close_days = deal['close_days']
     
+    # Random stage durations
     stage_durations = {
         'Qualified': random.uniform(0.2, 0.4),
         'Solutioning': random.uniform(0.2, 0.4),
@@ -243,14 +264,7 @@ def calculate_stage_transitions(deal):
 
 
 def generate_snapshots_for_deal(deal, snapshot_dates):
-    """
-    Generate snapshot records for a deal across all snapshot dates.
-    Only includes snapshots from deal creation onward.
-    
-    date_closed logic:
-    - If deal closes in 2024 or 2025: backfill date_closed on ALL rows
-    - If deal closes in 2026: keep as open pipeline (null date_closed, open stage)
-    """
+    """Generate snapshot records for a deal across all snapshot dates."""
     close_year = deal['date_closed'].year
     is_future_close = close_year >= 2026
     
@@ -263,6 +277,7 @@ def generate_snapshots_for_deal(deal, snapshot_dates):
             continue
         
         if is_future_close:
+            # Deal closes in future - keep as open pipeline
             current_stage = None
             for trans_date, stage in transitions:
                 if stage in [CLOSED_WON, CLOSED_LOST]:
@@ -285,6 +300,7 @@ def generate_snapshots_for_deal(deal, snapshot_dates):
                 'stage': current_stage
             })
         else:
+            # Deal closes in 2024/2025 - backfill date_closed
             current_stage = None
             for trans_date, stage in transitions:
                 if snap_date >= trans_date:
@@ -311,7 +327,7 @@ def generate_snapshots_for_deal(deal, snapshot_dates):
 
 
 def generate_snapshot_dates(start_year, end_year):
-    """Generate weekly snapshot dates covering the simulation period."""
+    """Generate weekly snapshot dates."""
     start = datetime(start_year, 1, 1)
     end = datetime(end_year, 12, 31)
     
@@ -330,12 +346,11 @@ def generate_snapshot_dates(start_year, end_year):
 
 def run_history_generator():
     print("=" * 70)
-    print("HISTORY GENERATOR - Mock Deal Snapshot Data")
+    print("MOCK DATA GENERATOR V2 - HIGH VOLUME")
     print("=" * 70)
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    used_names = set()
     all_deals = []
     deal_counter = 1
     
@@ -344,57 +359,52 @@ def run_history_generator():
     # Generate 2023 carryover pipeline
     if CARRYOVER_CONFIG.get('enabled', False):
         print(f"\n  2023 Carryover Pipeline:")
-        carryover_deals, deal_counter = generate_carryover_deals(deal_counter, used_names)
+        carryover_deals, deal_counter = generate_carryover_deals(deal_counter)
         all_deals.extend(carryover_deals)
         
-        carryover_stats = {'Large Market': 0, 'Mid Market': 0, 'Small Market': 0}
-        carryover_won = {'Large Market': 0, 'Mid Market': 0, 'Small Market': 0}
+        carryover_stats = {seg: 0 for seg in SEGMENT_CONFIG.keys()}
+        carryover_won = {seg: 0 for seg in SEGMENT_CONFIG.keys()}
+        carryover_rev = {seg: 0 for seg in SEGMENT_CONFIG.keys()}
+        
         for deal in carryover_deals:
             carryover_stats[deal['market_segment']] += 1
             if deal['final_stage'] == CLOSED_WON:
                 carryover_won[deal['market_segment']] += 1
+                carryover_rev[deal['market_segment']] += deal['net_revenue']
         
         for seg in SEGMENT_CONFIG.keys():
             actual_wr = (carryover_won[seg] / carryover_stats[seg] * 100) if carryover_stats[seg] > 0 else 0
-            print(f"    {seg:15s}: {carryover_stats[seg]:>2} deals, {carryover_won[seg]:>2} won ({actual_wr:.0f}%)")
+            print(f"    {seg:15s}: {carryover_stats[seg]:>3} deals, {carryover_won[seg]:>2} won ({actual_wr:.0f}%), ${carryover_rev[seg]:>10,.0f}")
         
-        print(f"    Created: {min(d['date_created'] for d in carryover_deals).date()} to {max(d['date_created'] for d in carryover_deals).date()}")
+        print(f"    Total carryover: {len(carryover_deals)} deals")
     
     # Generate FY 2024 and 2025 deals
     for year in FISCAL_YEARS:
         print(f"\n  FY {year}:")
         
-        segment_counts = {seg: cfg['count_per_year'] for seg, cfg in SEGMENT_CONFIG.items()}
-        deal_distribution = distribute_deals_across_months(year, segment_counts)
+        year_deals, deal_counter = generate_year_deals(year, deal_counter)
+        all_deals.extend(year_deals)
         
-        year_deals = {'Large Market': 0, 'Mid Market': 0, 'Small Market': 0}
-        year_won = {'Large Market': 0, 'Mid Market': 0, 'Small Market': 0}
+        year_stats = {seg: 0 for seg in SEGMENT_CONFIG.keys()}
+        year_won = {seg: 0 for seg in SEGMENT_CONFIG.keys()}
+        year_rev = {seg: 0 for seg in SEGMENT_CONFIG.keys()}
         
-        for month, segment in deal_distribution:
-            deal_id = generate_deal_id(year, deal_counter)
-            deal_name = generate_deal_name(used_names)
-            
-            deal = generate_deal(
-                deal_id=deal_id,
-                deal_name=deal_name,
-                year=year,
-                month=month,
-                segment=segment,
-                config=SEGMENT_CONFIG[segment]
-            )
-            
-            all_deals.append(deal)
-            year_deals[segment] += 1
+        for deal in year_deals:
+            year_stats[deal['market_segment']] += 1
             if deal['final_stage'] == CLOSED_WON:
-                year_won[segment] += 1
-            
-            deal_counter += 1
+                year_won[deal['market_segment']] += 1
+                year_rev[deal['market_segment']] += deal['net_revenue']
         
         for seg in SEGMENT_CONFIG.keys():
-            actual_wr = (year_won[seg] / year_deals[seg] * 100) if year_deals[seg] > 0 else 0
-            print(f"    {seg:15s}: {year_deals[seg]:>2} deals, {year_won[seg]:>2} won ({actual_wr:.0f}%)")
+            actual_wr = (year_won[seg] / year_stats[seg] * 100) if year_stats[seg] > 0 else 0
+            print(f"    {seg:15s}: {year_stats[seg]:>3} deals, {year_won[seg]:>2} won ({actual_wr:.0f}%), ${year_rev[seg]:>10,.0f}")
+        
+        total_year = sum(year_stats.values())
+        total_won = sum(year_won.values())
+        total_rev = sum(year_rev.values())
+        print(f"    {'TOTAL':15s}: {total_year:>3} deals, {total_won:>2} won ({total_won/total_year*100:.0f}%), ${total_rev:>10,.0f}")
     
-    print(f"\n  Total deals generated: {len(all_deals)}")
+    print(f"\n  Grand total deals generated: {len(all_deals)}")
     
     print("\n--- 2. Generating Snapshots ---")
     
@@ -427,15 +437,36 @@ def run_history_generator():
     print(f"  Unique deals: {df['deal_id'].nunique()}")
     print(f"  Date range: {df['date_snapshot'].min().date()} to {df['date_snapshot'].max().date()}")
     
-    print(f"\n  Stage distribution (latest snapshot):")
+    # Latest snapshot summary
     latest = df['date_snapshot'].max()
     df_latest = df[df['date_snapshot'] == latest]
-    for stage, count in df_latest['stage'].value_counts().items():
-        print(f"    {stage:20s}: {count}")
     
-    print(f"\n  Segment distribution:")
+    print(f"\n  Stage distribution (latest snapshot {latest.date()}):")
+    for stage, count in df_latest['stage'].value_counts().items():
+        print(f"    {stage:20s}: {count:>4}")
+    
+    print(f"\n  Segment distribution (latest snapshot):")
     for seg, count in df_latest['market_segment'].value_counts().items():
-        print(f"    {seg:15s}: {count}")
+        print(f"    {seg:15s}: {count:>4}")
+    
+    # Historical win summary
+    df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
+    df_won = df_final[df_final['stage'] == CLOSED_WON]
+    df_lost = df_final[df_final['stage'] == CLOSED_LOST]
+    
+    print(f"\n  Historical outcomes:")
+    print(f"    Won:  {len(df_won):>4} deals, ${df_won['net_revenue'].sum():>12,.0f}")
+    print(f"    Lost: {len(df_lost):>4} deals, ${df_lost['net_revenue'].sum():>12,.0f}")
+    print(f"    Open: {len(df_final) - len(df_won) - len(df_lost):>4} deals (pipeline)")
+    
+    # Monthly velocity check
+    df_first = df.sort_values('date_snapshot').groupby('deal_id').first().reset_index()
+    df_first['appear_month'] = df_first['date_snapshot'].dt.to_period('M')
+    monthly_vel = df_first.groupby('appear_month').size()
+    
+    print(f"\n  Monthly deal creation velocity (last 12 months):")
+    for period, count in monthly_vel.tail(12).items():
+        print(f"    {period}: {count:>3} deals")
     
     print(f"\n--- 5. Saving Output ---")
     
@@ -446,7 +477,7 @@ def run_history_generator():
     print(df[['deal_id', 'market_segment', 'stage', 'net_revenue', 'date_snapshot']].head(10).to_string())
     
     print("\n" + "=" * 70)
-    print("HISTORY GENERATION COMPLETE")
+    print("MOCK DATA GENERATION COMPLETE")
     print("=" * 70)
     
     return df
