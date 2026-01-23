@@ -1,0 +1,6 @@
+assumption,value,run_date
+volume_growth_multiplier,1.1,2026-01-22 21:17:26
+win_rate_uplift_multiplier,1.05,2026-01-22 21:17:26
+deal_size_inflation,1.03,2026-01-22 21:17:26
+manual_cycle_lag_months,,2026-01-22 21:17:26
+num_simulations,1000.0,2026-01-22 21:17:26
