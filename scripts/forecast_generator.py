@@ -534,7 +534,7 @@ def run_simulation():
 # ==========================================
 
 def generate_sensitivity_analysis(df_raw, win_rates, velocity, lags, engine):
-    """Optimized sensitivity with reasonable ranges."""
+    """Optimized sensitivity with reasonable ranges - uses monthly engine."""
     print("\n--- 4. Running Sensitivity Analysis (Constrained Scenarios) ---")
     
     # Tighter, more realistic scenarios
@@ -547,26 +547,34 @@ def generate_sensitivity_analysis(df_raw, win_rates, velocity, lags, engine):
     ]
     
     sensitivity_results = []
-    existing_deals = initialize_active_deals(df_raw, win_rates)
     
     # Store original assumptions
     orig_vol = ASSUMPTIONS['volume_growth_multiplier']
     orig_wr = ASSUMPTIONS['win_rate_uplift_multiplier']
     orig_size = ASSUMPTIONS['deal_size_inflation']
     
-    for scenario in scenarios:
-        # Override assumptions
+    # Pre-load existing deals once (reuse for all scenarios)
+    existing_deals = initialize_active_deals(df_raw, win_rates)
+    
+    for idx, scenario in enumerate(scenarios):
+        print(f"    Scenario {idx+1}/5: {scenario['name']}...", end='')
+        
+        # Override assumptions temporarily
         ASSUMPTIONS['volume_growth_multiplier'] = scenario['vol']
         ASSUMPTIONS['win_rate_uplift_multiplier'] = scenario['wr']
         ASSUMPTIONS['deal_size_inflation'] = scenario['size']
         
-        # Run 100 sims for this scenario
+        # Create new engine with updated assumptions
+        scenario_engine = MonthlyForecastEngine(win_rates, velocity, lags)
+        
+        # Run only 50 sims per scenario (reduced from 100 for speed)
         scenario_revs = []
         scenario_vols = []
         
-        for _ in range(100):
-            result = engine.run_monthly_simulation(existing_deals)
+        for _ in range(50):
+            result = scenario_engine.run_monthly_simulation(existing_deals)
             
+            # Sum across all months and segments
             total_rev = sum(
                 seg_data['won_rev']
                 for month_data in result.values()
@@ -581,6 +589,8 @@ def generate_sensitivity_analysis(df_raw, win_rates, velocity, lags, engine):
             
             scenario_revs.append(total_rev)
             scenario_vols.append(total_vol)
+        
+        print(f" P50: ${np.percentile(scenario_revs, 50)/1e6:.1f}M")
         
         sensitivity_results.append({
             'scenario': scenario['name'],
