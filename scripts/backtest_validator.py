@@ -29,17 +29,20 @@ UPDATED V2:
 """
 
 # Paths
-BASE_DIR = "data"
-PATH_RAW_SNAPSHOTS = os.path.join(BASE_DIR, "fact_snapshots.csv")  # <-- Your filename
-OUTPUT_BACKTEST_RESULTS = os.path.join(BASE_DIR, "backtest_validation_results.csv")
-OUTPUT_BACKTEST_SUMMARY = os.path.join(BASE_DIR, "backtest_summary.txt")
+EXPORT_DIR = "exports"
+INPUT_DIR = "data"
+VALIDATION_DIR = "validation"
+
+PATH_RAW_SNAPSHOTS = os.path.join(INPUT_DIR, "fact_snapshots.csv")  # <-- Your filename
+OUTPUT_BACKTEST_RESULTS = os.path.join(VALIDATION_DIR, "backtest_validation_results.csv")
+OUTPUT_BACKTEST_SUMMARY = os.path.join(EXPORT_DIR, "backtest_summary.txt")
 
 # Configuration
 TRAIN_END_DATE = '2025-06-30'
 TEST_START_DATE = '2025-07-01'
 TEST_END_DATE = '2025-12-31'
 
-PATH_ASSUMPTIONS_LOG = os.path.join(BASE_DIR, "forecast_assumptions_log.csv")
+PATH_ASSUMPTIONS_LOG = os.path.join(EXPORT_DIR, "forecast_assumptions_log.csv")
 
 # Stage Classifications (must match forecast_generator_v4)
 WON_STAGES = ["Closed Won", "Verbal"]

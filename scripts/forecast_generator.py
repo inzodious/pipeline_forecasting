@@ -35,8 +35,9 @@ ASSUMPTIONS = {
 }
 
 # Paths
-BASE_DIR = "data"
-PATH_RAW_SNAPSHOTS = os.path.join(BASE_DIR, "fact_snapshots.csv")  # <-- Your actual filename
+BASE_DIR = "exports"
+INPUT_DIR = "data"
+PATH_RAW_SNAPSHOTS = os.path.join(INPUT_DIR, "fact_snapshots.csv")  # <-- Your actual filename
 
 # Output Paths
 OUTPUT_DRIVER_WIN = os.path.join(BASE_DIR, "driver_win_rates.csv")
