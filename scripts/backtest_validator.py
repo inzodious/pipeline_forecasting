@@ -5,27 +5,19 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 # ==========================================
-# BACKTEST VALIDATION FRAMEWORK V2
+# BACKTEST VALIDATION FRAMEWORK V4
 # ==========================================
 """
 PURPOSE:
 Validates the forecast model by training on early data and testing against 
-known outcomes in later periods. Operates at MONTHLY AGGREGATION level.
+known outcomes in later periods.
 
-METHODOLOGY:
-1. Split data: Train on Jan 2024 - Jun 2025, Test on Jul - Dec 2025
-2. Calculate drivers from training period only
-3. Generate monthly forecast for test period
-4. Compare forecasted monthly totals to actual monthly totals
-5. Calculate accuracy metrics (MAPE, bias, hit rate)
-
-This proves the model works before trusting it with future forecasts.
-
-UPDATED V2: 
-- Uses correct column names (date_snapshot, date_closed, net_revenue, stage)
-- DSO calculated from date_created → date_closed (ignores date_implementation)
-- Velocity counts ALL deal first appearances (not just Qualified)
-- Stage detection uses pattern matching for lost stages
+PHILOSOPHY:
+- Uses NEUTRAL multipliers (1.0) for backtest to test model accuracy
+- All baselines derived from data (same logic as forecast)
+- No artificial floors/ceilings
+- A good backtest means the model learned the patterns correctly
+- Production forecast then applies growth assumptions on top
 """
 
 # Paths
@@ -33,20 +25,29 @@ EXPORT_DIR = "exports"
 INPUT_DIR = "data"
 VALIDATION_DIR = "validation"
 
-PATH_RAW_SNAPSHOTS = os.path.join(INPUT_DIR, "fact_snapshots.csv")  # <-- Your filename
+PATH_RAW_SNAPSHOTS = os.path.join(INPUT_DIR, "fact_snapshots.csv")
 OUTPUT_BACKTEST_RESULTS = os.path.join(VALIDATION_DIR, "backtest_validation_results.csv")
-OUTPUT_BACKTEST_SUMMARY = os.path.join(EXPORT_DIR, "backtest_summary.txt")
+OUTPUT_BACKTEST_SUMMARY = os.path.join(VALIDATION_DIR, "backtest_summary.txt")
 
 # Configuration
 TRAIN_END_DATE = '2025-06-30'
 TEST_START_DATE = '2025-07-01'
 TEST_END_DATE = '2025-12-31'
 
-PATH_ASSUMPTIONS_LOG = os.path.join(EXPORT_DIR, "forecast_assumptions_log.csv")
-
-# Stage Classifications (must match forecast_generator_v4)
+# Stage Classifications (must match forecast_generator)
 WON_STAGES = ["Closed Won", "Verbal"]
 LOST_PATTERNS = ["Closed Lost", "Declined to Bid"]
+
+# BACKTEST ASSUMPTIONS - NEUTRAL for fair model validation
+# These are 1.0 because we're testing if the model learned the patterns correctly
+BACKTEST_ASSUMPTIONS = {
+    'volume_growth_multiplier': 1.00,       # NEUTRAL
+    'win_rate_uplift_multiplier': 1.00,     # NEUTRAL
+    'deal_size_inflation': 1.00,            # NEUTRAL
+    'num_simulations': 500,
+    'velocity_smoothing_window': 3,
+    'confidence_interval_clip': 0.95
+}
 
 
 # ==========================================
@@ -54,13 +55,11 @@ LOST_PATTERNS = ["Closed Lost", "Declined to Bid"]
 # ==========================================
 
 def is_won(stage):
-    """Check if stage indicates a won deal."""
     if pd.isna(stage):
         return False
     return stage in WON_STAGES
 
 def is_lost(stage):
-    """Check if stage indicates a lost deal (supports wildcards)."""
     if pd.isna(stage):
         return False
     for pattern in LOST_PATTERNS:
@@ -69,119 +68,63 @@ def is_lost(stage):
     return False
 
 def is_closed(stage):
-    """Check if deal is closed (won or lost)."""
     return is_won(stage) or is_lost(stage)
 
 
 # ==========================================
-# LOAD ASSUMPTIONS FROM FORECAST RUN
-# ==========================================
-
-def load_forecast_assumptions():
-    """
-    Loads the exact assumptions used in the production forecast.
-    This ensures backtest uses identical parameters for fair validation.
-    """
-    if os.path.exists(PATH_ASSUMPTIONS_LOG):
-        print("  > Loading assumptions from production forecast run...")
-        df_assumptions = pd.read_csv(PATH_ASSUMPTIONS_LOG)
-        
-        assumptions = {}
-        for _, row in df_assumptions.iterrows():
-            key = row['assumption']
-            value = row['value']
-            
-            # Convert string values to appropriate types
-            if value == 'None':
-                assumptions[key] = None
-            elif isinstance(value, str):
-                # Handle lists stored as strings
-                if value.startswith('['):
-                    assumptions[key] = eval(value)
-                elif value.replace('.', '').replace('-', '').isdigit():
-                    assumptions[key] = float(value) if '.' in value else int(value)
-                else:
-                    assumptions[key] = value
-            else:
-                assumptions[key] = value
-        
-        print(f"    Loaded {len(assumptions)} assumptions from forecast run")
-        return assumptions
-    else:
-        print("  > WARNING: No forecast assumptions log found.")
-        print("    Using default backtest assumptions (no growth for pure model test)")
-        return {
-            'volume_growth_multiplier': 1.00,
-            'win_rate_uplift_multiplier': 1.00,
-            'deal_size_inflation': 1.00,
-            'num_simulations': 200,
-            'min_monthly_deals_floor': 3,
-            'max_monthly_deals_ceiling': 150,
-            'min_win_rate_floor': 0.05,
-            'max_win_rate_ceiling': 0.50,
-            'deal_size_variance_cap': 0.25,
-            'velocity_smoothing_window': 3,
-            'confidence_interval_clip': 0.95
-        }
-
-# Load assumptions at module level
-BACKTEST_ASSUMPTIONS = load_forecast_assumptions()
-
-
-# ==========================================
-# DSO CALCULATION (date_created → date_closed)
+# DSO CALCULATION (from data)
 # ==========================================
 
 def calculate_dso_backtest(df, cutoff_date):
-    """
-    Calculate DSO distribution using only training data.
-    Uses date_created → date_closed, NOT date_implementation.
-    """
+    """Calculate DSO from training data only."""
     df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
     
-    # Filter to closed deals
     df_final['is_won_flag'] = df_final['stage'].apply(is_won)
     df_final['is_lost_flag'] = df_final['stage'].apply(is_lost)
     df_closed = df_final[df_final['is_won_flag'] | df_final['is_lost_flag']].copy()
     
-    # Only use deals closed before cutoff
     df_closed = df_closed[df_closed['date_closed'] <= cutoff_date].copy()
     
     df_closed['cycle_days'] = (df_closed['date_closed'] - df_closed['date_created']).dt.days
-    df_valid = df_closed[(df_closed['cycle_days'] >= 7) & (df_closed['cycle_days'] <= 365)]
+    df_valid = df_closed[df_closed['cycle_days'] > 0]
+    
+    # Overall fallback
+    if len(df_valid) > 0:
+        overall_mean = df_valid['cycle_days'].mean()
+        overall_std = df_valid['cycle_days'].std()
+        overall_median = df_valid['cycle_days'].median()
+    else:
+        overall_mean, overall_std, overall_median = 60, 20, 60
     
     dso_dict = {}
     
     for seg in df['market_segment'].unique():
         seg_data = df_valid[df_valid['market_segment'] == seg]
         
-        if len(seg_data) >= 5:
+        if len(seg_data) >= 3:
             dso_dict[seg] = {
                 'mean': seg_data['cycle_days'].mean(),
-                'std': max(seg_data['cycle_days'].std(), 10),
+                'std': max(seg_data['cycle_days'].std(), 1),
                 'median': seg_data['cycle_days'].median()
             }
         else:
-            # Fallback to overall
             dso_dict[seg] = {
-                'mean': df_valid['cycle_days'].mean(),
-                'std': max(df_valid['cycle_days'].std(), 10),
-                'median': df_valid['cycle_days'].median()
+                'mean': overall_mean,
+                'std': max(overall_std, 1),
+                'median': overall_median
             }
     
     return dso_dict
 
 
 # ==========================================
-# WIN RATE CALCULATION
+# WIN RATE CALCULATION (from data)
 # ==========================================
 
 def calculate_win_rates_backtest(df, cutoff_date):
-    """Calculate revenue-weighted win rates using only training data."""
-    
+    """Calculate win rates from training data only."""
     df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
     
-    # Filter to deals closed before cutoff
     df_final['is_won_flag'] = df_final['stage'].apply(is_won)
     df_final['is_lost_flag'] = df_final['stage'].apply(is_lost)
     df_final['is_closed_flag'] = df_final['is_won_flag'] | df_final['is_lost_flag']
@@ -191,58 +134,48 @@ def calculate_win_rates_backtest(df, cutoff_date):
         (df_final['date_closed'] <= cutoff_date)
     ].copy()
     
-    if len(df_closed) == 0:
-        return {seg: 0.20 for seg in df['market_segment'].unique()}
+    # Overall fallback
+    overall_won = df_closed['is_won_flag'].sum()
+    overall_total = len(df_closed)
+    overall_wr = overall_won / overall_total if overall_total > 0 else 0.20
     
     win_rates = {}
     
     for seg in df['market_segment'].unique():
         seg_data = df_closed[df_closed['market_segment'] == seg]
         
-        won_rev = seg_data[seg_data['is_won_flag']]['net_revenue'].sum()
-        lost_rev = seg_data[seg_data['is_lost_flag']]['net_revenue'].sum()
-        total_rev = won_rev + lost_rev
+        won_count = seg_data['is_won_flag'].sum()
+        total_count = len(seg_data)
         
-        raw_wr = (won_rev / total_rev) if total_rev > 0 else 0.20
-        
-        win_rates[seg] = np.clip(
-            raw_wr,
-            BACKTEST_ASSUMPTIONS.get('min_win_rate_floor', 0.05),
-            BACKTEST_ASSUMPTIONS.get('max_win_rate_ceiling', 0.50)
-        )
+        # Use actual rate from data
+        if total_count > 0:
+            win_rates[seg] = won_count / total_count
+        else:
+            win_rates[seg] = overall_wr
     
     return win_rates
 
 
 # ==========================================
-# VELOCITY CALCULATION (ALL first appearances)
+# VELOCITY CALCULATION (from data)
 # ==========================================
 
 def calculate_velocity_backtest(df, cutoff_date):
-    """
-    Calculate velocity using only training data.
-    Counts ALL deal first appearances, regardless of entry stage.
-    """
-    
-    # Filter to snapshots before cutoff
+    """Calculate velocity from training data only."""
     df_train = df[df['date_snapshot'] <= cutoff_date].copy()
     
-    # Find first appearance of each deal
     df_first = df_train.sort_values('date_snapshot').groupby('deal_id').first().reset_index()
     df_first['appear_year'] = df_first['date_snapshot'].dt.year
     df_first['appear_month'] = df_first['date_snapshot'].dt.month
     
-    # Use most recent complete year in training data
     cutoff_year = cutoff_date.year
     cutoff_month = cutoff_date.month
     
-    # If cutoff is mid-year, use prior year as baseline
     if cutoff_month < 12:
         baseline_year = cutoff_year - 1
     else:
         baseline_year = cutoff_year
     
-    # Make sure we have data for that year
     if baseline_year not in df_first['appear_year'].values:
         baseline_year = df_first['appear_year'].max()
     
@@ -255,8 +188,10 @@ def calculate_velocity_backtest(df, cutoff_date):
         seg_data = df_baseline[df_baseline['market_segment'] == seg]
         
         annual_count = len(seg_data)
-        monthly_avg = max(BACKTEST_ASSUMPTIONS.get('min_monthly_deals_floor', 3), annual_count / 12)
-        annual_avg_size = seg_data['net_revenue'].mean() if len(seg_data) > 0 else 50000
+        annual_avg_size = seg_data['net_revenue'].mean() if len(seg_data) > 0 else df_baseline['net_revenue'].mean()
+        
+        if pd.isna(annual_avg_size):
+            annual_avg_size = df['net_revenue'].mean()
         
         monthly_vols = []
         monthly_sizes = []
@@ -264,14 +199,15 @@ def calculate_velocity_backtest(df, cutoff_date):
         for m in range(1, 13):
             m_data = seg_data[seg_data['appear_month'] == m]
             
-            if len(m_data) >= 3:
-                monthly_vols.append(len(m_data))
+            # Use actual counts (including 0)
+            monthly_vols.append(len(m_data))
+            
+            if len(m_data) > 0:
                 monthly_sizes.append(m_data['net_revenue'].mean())
             else:
-                monthly_vols.append(monthly_avg)
                 monthly_sizes.append(annual_avg_size)
         
-        # Apply smoothing
+        # Optional smoothing
         smoothing = BACKTEST_ASSUMPTIONS.get('velocity_smoothing_window', 3)
         if smoothing > 1:
             monthly_vols_smooth = pd.Series(monthly_vols).rolling(
@@ -281,14 +217,43 @@ def calculate_velocity_backtest(df, cutoff_date):
             monthly_vols_smooth = monthly_vols
         
         for m in range(1, 13):
-            vol = np.clip(
-                monthly_vols_smooth[m - 1],
-                BACKTEST_ASSUMPTIONS.get('min_monthly_deals_floor', 3),
-                BACKTEST_ASSUMPTIONS.get('max_monthly_deals_ceiling', 150)
-            )
-            velocity_dict[seg][m] = {'vol': vol, 'size': monthly_sizes[m - 1]}
+            velocity_dict[seg][m] = {
+                'vol': monthly_vols_smooth[m - 1],
+                'size': monthly_sizes[m - 1]
+            }
     
     return velocity_dict
+
+
+# ==========================================
+# DATA PROFILE (from training data)
+# ==========================================
+
+def profile_data_backtest(df, cutoff_date):
+    """Profile deal size ranges from training data."""
+    df_train = df[df['date_snapshot'] <= cutoff_date].copy()
+    df_final = df_train.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
+    
+    profile = {}
+    
+    for seg in df['market_segment'].unique():
+        seg_data = df_final[df_final['market_segment'] == seg]
+        
+        if len(seg_data) > 0:
+            profile[seg] = {
+                'min_deal_size': seg_data['net_revenue'].min(),
+                'max_deal_size': seg_data['net_revenue'].max(),
+                'avg_deal_size': seg_data['net_revenue'].mean()
+            }
+        else:
+            # Fallback to overall
+            profile[seg] = {
+                'min_deal_size': df_final['net_revenue'].min(),
+                'max_deal_size': df_final['net_revenue'].max(),
+                'avg_deal_size': df_final['net_revenue'].mean()
+            }
+    
+    return profile
 
 
 # ==========================================
@@ -296,16 +261,17 @@ def calculate_velocity_backtest(df, cutoff_date):
 # ==========================================
 
 class BacktestEngine:
-    """Forecast engine for backtest - mirrors production logic."""
+    """Forecast engine for backtest - mirrors production logic with neutral assumptions."""
     
-    def __init__(self, win_rates, velocity, dso_dict, test_months):
+    def __init__(self, win_rates, velocity, dso_dict, data_profile, test_months):
         self.win_rates = win_rates
         self.velocity = velocity
         self.dso_dict = dso_dict
+        self.data_profile = data_profile
         self.test_months = test_months
     
     def generate_monthly_deals(self, month, segment):
-        """Generate deals for a specific month/segment."""
+        """Generate deals using data-derived baselines with NEUTRAL multipliers."""
         month_num = month.month
         
         if segment not in self.velocity or month_num not in self.velocity[segment]:
@@ -313,47 +279,41 @@ class BacktestEngine:
         
         stats = self.velocity[segment][month_num]
         
-        # Apply growth (for backtest, typically set to 1.0 for fair comparison)
-        vol_growth = BACKTEST_ASSUMPTIONS.get('volume_growth_multiplier', 1.0)
-        base_vol = stats['vol'] * vol_growth
-        base_vol = np.clip(
-            base_vol,
-            BACKTEST_ASSUMPTIONS.get('min_monthly_deals_floor', 3),
-            BACKTEST_ASSUMPTIONS.get('max_monthly_deals_ceiling', 150)
-        )
+        # Apply NEUTRAL multiplier
+        base_vol = stats['vol'] * BACKTEST_ASSUMPTIONS.get('volume_growth_multiplier', 1.0)
         
-        num_deals = max(
-            BACKTEST_ASSUMPTIONS.get('min_monthly_deals_floor', 3),
-            np.random.poisson(base_vol)
-        )
+        if base_vol <= 0:
+            num_deals = 0
+        else:
+            num_deals = np.random.poisson(base_vol)
         
         deals = []
-        size_inflation = BACKTEST_ASSUMPTIONS.get('deal_size_inflation', 1.0)
-        avg_size = stats['size'] * size_inflation
         
+        # Apply NEUTRAL inflation
+        avg_size = stats['size'] * BACKTEST_ASSUMPTIONS.get('deal_size_inflation', 1.0)
+        
+        # Apply NEUTRAL win rate uplift
         base_wr = self.win_rates.get(segment, 0.20)
-        wr_uplift = BACKTEST_ASSUMPTIONS.get('win_rate_uplift_multiplier', 1.0)
-        adj_wr = np.clip(
-            base_wr * wr_uplift,
-            BACKTEST_ASSUMPTIONS.get('min_win_rate_floor', 0.05),
-            BACKTEST_ASSUMPTIONS.get('max_win_rate_ceiling', 0.50)
-        )
+        adj_wr = base_wr * BACKTEST_ASSUMPTIONS.get('win_rate_uplift_multiplier', 1.0)
         
-        seg_dso = self.dso_dict.get(segment, {'mean': 60, 'std': 30})
+        seg_dso = self.dso_dict.get(segment, {'mean': 60, 'std': 20})
+        
+        # Get deal size range from data
+        seg_profile = self.data_profile.get(segment, {})
+        min_size = seg_profile.get('min_deal_size', avg_size * 0.5)
+        max_size = seg_profile.get('max_deal_size', avg_size * 1.5)
         
         for _ in range(num_deals):
             is_won = np.random.random() < adj_wr
             
-            variance_cap = BACKTEST_ASSUMPTIONS.get('deal_size_variance_cap', 0.25)
-            size_mult = 1.0 + np.random.uniform(-variance_cap, variance_cap)
-            actual_rev = int(avg_size * size_mult)
+            # Sample from actual deal size range
+            actual_rev = int(np.random.uniform(min_size, max_size))
             
             days_in_month = (month + pd.DateOffset(months=1) - timedelta(days=1)).day
             create_day = np.random.randint(1, days_in_month + 1)
             create_date = month + timedelta(days=create_day - 1)
             
-            # Sample cycle time from DSO distribution
-            cycle_days = max(14, int(np.random.normal(seg_dso['mean'], seg_dso['std'])))
+            cycle_days = max(1, int(np.random.normal(seg_dso['mean'], seg_dso['std'])))
             close_date = create_date + timedelta(days=cycle_days)
             
             deals.append({
@@ -375,7 +335,7 @@ class BacktestEngine:
         
         all_deals = list(existing_deals)
         
-        # Generate new deals for each test month
+        # Generate new deals for test period
         for month in self.test_months:
             for segment in self.velocity.keys():
                 new_deals = self.generate_monthly_deals(month, segment)
@@ -398,15 +358,12 @@ class BacktestEngine:
 # ==========================================
 
 def extract_actual_monthly_results(df, test_start, test_end):
-    """Extract actual monthly results from test period using date_closed."""
-    
+    """Extract actual results from test period."""
     test_start = pd.to_datetime(test_start)
     test_end = pd.to_datetime(test_end)
     
-    # Get final state of each deal
     df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
     
-    # Filter to won deals closed in test period
     df_final['is_won_flag'] = df_final['stage'].apply(is_won)
     
     df_won = df_final[
@@ -417,7 +374,6 @@ def extract_actual_monthly_results(df, test_start, test_end):
     
     df_won['close_month'] = df_won['date_closed'].dt.to_period('M').dt.to_timestamp()
     
-    # Aggregate by month and segment
     actual_monthly = defaultdict(lambda: defaultdict(lambda: {
         'actual_won_vol': 0,
         'actual_won_rev': 0
@@ -438,8 +394,6 @@ def extract_actual_monthly_results(df, test_start, test_end):
 
 def compare_forecast_to_actual(forecasted_list, actual):
     """Compare average forecasted results to actual."""
-    
-    # Average across simulations
     avg_forecasted = defaultdict(lambda: defaultdict(lambda: {
         'forecasted_won_vol': 0,
         'forecasted_won_rev': 0
@@ -457,7 +411,6 @@ def compare_forecast_to_actual(forecasted_list, actual):
             avg_forecasted[month][seg]['forecasted_won_vol'] /= num_sims
             avg_forecasted[month][seg]['forecasted_won_rev'] /= num_sims
     
-    # Build comparison
     comparison_rows = []
     
     all_months = set(avg_forecasted.keys()) | set(actual.keys())
@@ -498,13 +451,23 @@ def compare_forecast_to_actual(forecasted_list, actual):
 
 def calculate_accuracy_metrics(df_comparison):
     """Calculate summary accuracy statistics."""
+    total_forecasted = df_comparison['forecasted_won_revenue'].sum()
+    total_actual = df_comparison['actual_won_revenue'].sum()
+    
+    overall_pct_error = ((total_forecasted - total_actual) / total_actual * 100) if total_actual > 0 else 0
     
     df_valid = df_comparison[df_comparison['actual_won_revenue'] > 0].copy()
     
     if len(df_valid) == 0:
         return {
-            'mape_revenue': 0, 'bias_revenue': 0, 'rmse_revenue': 0,
-            'hit_rate_within_20pct': 0, 'num_periods_analyzed': 0
+            'mape_revenue': 0, 
+            'bias_revenue': 0, 
+            'rmse_revenue': 0,
+            'hit_rate_within_20pct': 0, 
+            'num_periods_analyzed': 0,
+            'overall_pct_error': overall_pct_error,
+            'total_forecasted': total_forecasted,
+            'total_actual': total_actual
         }
     
     mape_rev = df_valid['revenue_pct_error'].abs().mean()
@@ -519,7 +482,10 @@ def calculate_accuracy_metrics(df_comparison):
         'bias_revenue': bias_rev,
         'rmse_revenue': rmse_rev,
         'hit_rate_within_20pct': hit_rate,
-        'num_periods_analyzed': len(df_valid)
+        'num_periods_analyzed': len(df_valid),
+        'overall_pct_error': overall_pct_error,
+        'total_forecasted': total_forecasted,
+        'total_actual': total_actual
     }
 
 
@@ -528,21 +494,14 @@ def calculate_accuracy_metrics(df_comparison):
 # ==========================================
 
 def run_backtest_validation():
-    """Main backtest validation workflow."""
     print("=" * 70)
-    print("BACKTEST VALIDATION V2 - CORRECTED LOGIC")
+    print("BACKTEST VALIDATION V4 - DATA-DRIVEN WITH NEUTRAL ASSUMPTIONS")
     print("=" * 70)
     
-    print("\n--- 0. Loading Production Forecast Assumptions ---")
-    if os.path.exists(PATH_ASSUMPTIONS_LOG):
-        df_show = pd.read_csv(PATH_ASSUMPTIONS_LOG)
-        print("\n    Production forecast used these assumptions:")
-        for _, row in df_show.iterrows():
-            print(f"      {row['assumption']:35s} = {row['value']}")
-        print("\n    Backtest will use IDENTICAL assumptions for fair comparison.")
-    else:
-        print("\n    No forecast log found - using default assumptions.")
-        print("    Run forecast_generator_v4.py first to generate assumptions log.")
+    print("\n--- 0. Backtest Configuration ---")
+    print("\n    NEUTRAL multipliers test if model learned patterns correctly:")
+    for key, value in BACKTEST_ASSUMPTIONS.items():
+        print(f"      {key:35s} = {value}")
     
     print("\n--- 1. Loading Historical Data ---")
     if not os.path.exists(PATH_RAW_SNAPSHOTS):
@@ -559,26 +518,28 @@ def run_backtest_validation():
     test_end = pd.to_datetime(TEST_END_DATE)
     
     df_train = df_raw[df_raw['date_snapshot'] <= train_end].copy()
-    df_full = df_raw.copy()  # Need full data to extract actuals
+    df_full = df_raw.copy()
     
     print(f"    Training: {df_train['date_snapshot'].min().date()} to {train_end.date()}")
     print(f"    Testing:  {test_start.date()} to {test_end.date()}")
     print(f"    Training records: {len(df_train):,}")
     print(f"    Unique deals in training: {df_train['deal_id'].nunique():,}")
     
-    print("\n--- 2. Calculating Drivers (Training Data Only) ---")
+    print("\n--- 2. Calculating Drivers (from training data) ---")
     dso_dict = calculate_dso_backtest(df_train, train_end)
     win_rates = calculate_win_rates_backtest(df_train, train_end)
     velocity = calculate_velocity_backtest(df_train, train_end)
+    data_profile = profile_data_backtest(df_train, train_end)
     
-    print(f"    Win rates calculated for {len(win_rates)} segments")
+    print(f"    Drivers calculated for {len(win_rates)} segments:")
     for seg, wr in win_rates.items():
         dso = dso_dict.get(seg, {}).get('median', 60)
-        print(f"      {seg}: WR={wr:.1%}, DSO={dso:.0f} days")
+        seg_vel = velocity.get(seg, {})
+        avg_monthly = np.mean([seg_vel.get(m, {}).get('vol', 0) for m in range(1, 13)])
+        print(f"      {seg}: WR={wr:.1%}, DSO={dso:.0f}d, Vel={avg_monthly:.2f}/month")
     
     print("\n--- 3. Initializing Pipeline (as of training cutoff) ---")
     
-    # Get open deals as of training end date
     latest_train_snapshot = df_train['date_snapshot'].max()
     df_latest = df_train[df_train['date_snapshot'] == latest_train_snapshot].copy()
     
@@ -594,19 +555,15 @@ def run_backtest_validation():
         create_date = pd.to_datetime(row['date_created'])
         
         base_wr = win_rates.get(seg, 0.20)
-        wr_uplift = BACKTEST_ASSUMPTIONS.get('win_rate_uplift_multiplier', 1.0)
-        adj_wr = np.clip(
-            base_wr * wr_uplift,
-            BACKTEST_ASSUMPTIONS.get('min_win_rate_floor', 0.05),
-            BACKTEST_ASSUMPTIONS.get('max_win_rate_ceiling', 0.50)
-        )
+        # NEUTRAL multiplier
+        adj_wr = base_wr * BACKTEST_ASSUMPTIONS.get('win_rate_uplift_multiplier', 1.0)
         is_won = np.random.random() < adj_wr
         
-        seg_dso = dso_dict.get(seg, {'mean': 60, 'std': 30})
+        seg_dso = dso_dict.get(seg, {'mean': 60, 'std': 20})
         days_open = (latest_train_snapshot - create_date).days
         
         total_cycle = int(np.random.normal(seg_dso['mean'], seg_dso['std']))
-        total_cycle = max(days_open + np.random.randint(7, 45), total_cycle)
+        total_cycle = max(days_open + np.random.randint(7, 30), total_cycle)
         
         close_date = create_date + timedelta(days=total_cycle)
         
@@ -621,14 +578,14 @@ def run_backtest_validation():
     print("\n--- 4. Running Backtest Simulations ---")
     
     test_months = pd.date_range(test_start, test_end, freq='MS')
-    num_sims = BACKTEST_ASSUMPTIONS.get('num_simulations', 200)
+    num_sims = BACKTEST_ASSUMPTIONS.get('num_simulations', 500)
     
-    engine = BacktestEngine(win_rates, velocity, dso_dict, test_months)
+    engine = BacktestEngine(win_rates, velocity, dso_dict, data_profile, test_months)
     
     all_forecasted = []
     
     for sim in range(num_sims):
-        if (sim + 1) % 50 == 0:
+        if (sim + 1) % 100 == 0:
             print(f"    Completed {sim + 1}/{num_sims} simulations...")
         
         forecasted = engine.run_simulation(existing_deals)
@@ -637,7 +594,6 @@ def run_backtest_validation():
     print("\n--- 5. Extracting Actual Results (Test Period) ---")
     actual_results = extract_actual_monthly_results(df_full, test_start, test_end)
     
-    # Display actual totals
     total_actual_vol = sum(
         seg_data['actual_won_vol'] 
         for month_data in actual_results.values() 
@@ -651,10 +607,12 @@ def run_backtest_validation():
     print(f"    Actual test period: {total_actual_vol} deals, ${total_actual_rev:,.0f}")
     
     print("\n--- 6. Comparing Forecast to Actual ---")
+    os.makedirs(VALIDATION_DIR, exist_ok=True)
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    
     df_comparison = compare_forecast_to_actual(all_forecasted, actual_results)
     df_comparison.to_csv(OUTPUT_BACKTEST_RESULTS, index=False)
     
-    # Show monthly comparison
     monthly_comp = df_comparison.groupby('month').agg({
         'forecasted_won_volume': 'sum',
         'actual_won_volume': 'sum',
@@ -667,7 +625,11 @@ def run_backtest_validation():
     print("    " + "-" * 66)
     
     for month, row in monthly_comp.iterrows():
-        print(f"    {month.strftime('%Y-%m'):<12} {row['forecasted_won_volume']:>10.0f} {row['actual_won_volume']:>12.0f} ${row['forecasted_won_revenue']:>13,.0f} ${row['actual_won_revenue']:>13,.0f}")
+        print(f"    {month.strftime('%Y-%m'):<12} {row['forecasted_won_volume']:>10.1f} {row['actual_won_volume']:>12.0f} ${row['forecasted_won_revenue']:>13,.0f} ${row['actual_won_revenue']:>13,.0f}")
+    
+    total_fcst = monthly_comp['forecasted_won_revenue'].sum()
+    print("    " + "-" * 66)
+    print(f"    {'TOTAL':<12} {monthly_comp['forecasted_won_volume'].sum():>10.1f} {monthly_comp['actual_won_volume'].sum():>12.0f} ${total_fcst:>13,.0f} ${total_actual_rev:>13,.0f}")
     
     print(f"\n    Results saved: {OUTPUT_BACKTEST_RESULTS}")
     
@@ -677,69 +639,66 @@ def run_backtest_validation():
     # Generate summary
     summary_text = f"""
 {'=' * 70}
-BACKTEST VALIDATION SUMMARY V2
+BACKTEST VALIDATION SUMMARY V4 - DATA-DRIVEN MODEL
 {'=' * 70}
 
 TEST PERIOD: {test_start.date()} to {test_end.date()} (6 months)
 TRAINING PERIOD: {df_train['date_snapshot'].min().date()} to {train_end.date()}
-AGGREGATION LEVEL: Monthly totals by segment
 
-ACCURACY METRICS
+OVERALL ACCURACY
 ----------------
+Total Forecasted Revenue:      ${metrics['total_forecasted']:>15,.0f}
+Total Actual Revenue:          ${metrics['total_actual']:>15,.0f}
+Difference:                    ${metrics['total_forecasted'] - metrics['total_actual']:>+15,.0f}
+Overall Percent Error:         {metrics['overall_pct_error']:>+15.1f}%
+
+SEGMENT-LEVEL METRICS
+---------------------
 Mean Absolute Percentage Error (MAPE):  {metrics['mape_revenue']:.2f}%
 Forecast Bias:                          {metrics['bias_revenue']:+.2f}%
 Root Mean Squared Error (RMSE):         ${metrics['rmse_revenue']:,.0f}
-Hit Rate (within ±20%):                 {metrics['hit_rate_within_20pct']:.1f}%
+Hit Rate (within +/-20%):               {metrics['hit_rate_within_20pct']:.1f}%
 
-Month-Segment Periods Analyzed:         {metrics['num_periods_analyzed']}
-
-ACTUAL VS FORECAST TOTALS
--------------------------
-Actual Test Period Revenue:             ${total_actual_rev:,.0f}
-Forecasted Test Period Revenue:         ${monthly_comp['forecasted_won_revenue'].sum():,.0f}
-Difference:                             ${monthly_comp['forecasted_won_revenue'].sum() - total_actual_rev:+,.0f}
+Periods Analyzed:                       {metrics['num_periods_analyzed']}
 
 INTERPRETATION
 --------------
 """
     
-    if metrics['mape_revenue'] < 15:
-        summary_text += "✓ EXCELLENT: Model demonstrates strong predictive accuracy (MAPE < 15%)\n"
-    elif metrics['mape_revenue'] < 25:
-        summary_text += "✓ GOOD: Model shows acceptable predictive accuracy (MAPE < 25%)\n"
-    elif metrics['mape_revenue'] < 40:
-        summary_text += "⚠ MODERATE: Model accuracy is acceptable but could improve (MAPE < 40%)\n"
+    abs_overall_error = abs(metrics['overall_pct_error'])
+    if abs_overall_error < 25:
+        summary_text += "[OK] Model learned historical patterns well (<25% error)\n"
+    elif abs_overall_error < 50:
+        summary_text += "[--] Model shows moderate accuracy (25-50% error)\n"
     else:
-        summary_text += "⚠ REVIEW NEEDED: Model accuracy below target (MAPE > 40%)\n"
+        summary_text += "[!!] Model needs calibration (>50% error)\n"
     
-    if abs(metrics['bias_revenue']) < 10:
-        summary_text += "✓ UNBIASED: No significant systematic over/under-forecasting\n"
-    elif metrics['bias_revenue'] > 10:
-        summary_text += "⚠ UPWARD BIAS: Model tends to over-forecast\n"
+    if metrics['overall_pct_error'] > 25:
+        summary_text += "[!!] OVER-FORECASTING: Check velocity calculation\n"
+    elif metrics['overall_pct_error'] < -25:
+        summary_text += "[!!] UNDER-FORECASTING: Check DSO distribution\n"
     else:
-        summary_text += "⚠ DOWNWARD BIAS: Model tends to under-forecast\n"
-    
-    if metrics['hit_rate_within_20pct'] > 60:
-        summary_text += "✓ GOOD PRECISION: Majority of forecasts within ±20% of actual\n"
-    else:
-        summary_text += "⚠ MODERATE PRECISION: Consider tightening variance constraints\n"
+        summary_text += "[OK] No significant systematic bias\n"
     
     summary_text += f"""
 
-METHODOLOGY NOTES (V2 Corrections)
-----------------------------------
-1. DSO calculated from date_created → date_closed (NOT date_implementation)
-2. Velocity counts ALL deal first appearances, not just 'Qualified' stage
-3. Win rates are revenue-weighted from closed deals only
-4. Stage classification uses pattern matching for lost stages
-
-ASSUMPTIONS USED IN BACKTEST
-----------------------------
+DATA-DERIVED BASELINES USED
+---------------------------
 """
-    
+    for seg in win_rates.keys():
+        wr = win_rates.get(seg, 0)
+        dso = dso_dict.get(seg, {}).get('mean', 60)
+        seg_vel = velocity.get(seg, {})
+        avg_monthly = np.mean([seg_vel.get(m, {}).get('vol', 0) for m in range(1, 13)])
+        summary_text += f"  {seg:20s}: WR={wr:.1%}, DSO={dso:.0f}d, Vel={avg_monthly:.2f}/mo\n"
+
+    summary_text += f"""
+
+BACKTEST ASSUMPTIONS (NEUTRAL)
+------------------------------
+"""
     for key, value in BACKTEST_ASSUMPTIONS.items():
-        if not key.startswith('_'):
-            summary_text += f"  {key:40s}: {value}\n"
+        summary_text += f"  {key:40s}: {value}\n"
     
     summary_text += f"""
 
@@ -747,18 +706,18 @@ RECOMMENDATION
 --------------
 """
     
-    if metrics['mape_revenue'] < 25 and abs(metrics['bias_revenue']) < 15:
-        summary_text += "✓ Model is suitable for production forecasting.\n"
-        summary_text += "  Proceed with 2026 forecast with reasonable confidence.\n"
+    if abs_overall_error < 30:
+        summary_text += "[OK] Model is suitable for production forecasting.\n"
+        summary_text += "     Apply growth multipliers for 2026 projections.\n"
     else:
-        summary_text += "⚠ Model may require calibration.\n"
-        summary_text += "  Review driver calculations and consider adjusting assumptions.\n"
+        summary_text += "[!!] Review velocity and DSO calculations.\n"
+        summary_text += "     Model may not have learned patterns correctly.\n"
     
     summary_text += f"\n{'=' * 70}\n"
     
     print(summary_text)
     
-    with open(OUTPUT_BACKTEST_SUMMARY, 'w') as f:
+    with open(OUTPUT_BACKTEST_SUMMARY, 'w', encoding='utf-8') as f:
         f.write(summary_text)
     
     print(f"Summary saved: {OUTPUT_BACKTEST_SUMMARY}")

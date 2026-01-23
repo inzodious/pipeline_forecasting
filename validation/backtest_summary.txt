@@ -1,0 +1,53 @@
+
+======================================================================
+BACKTEST VALIDATION SUMMARY V4 - DATA-DRIVEN MODEL
+======================================================================
+
+TEST PERIOD: 2025-07-01 to 2025-12-31 (6 months)
+TRAINING PERIOD: 2024-01-01 to 2025-06-30
+
+OVERALL ACCURACY
+----------------
+Total Forecasted Revenue:      $        150,738
+Total Actual Revenue:          $        104,028
+Difference:                    $        +46,710
+Overall Percent Error:                   +44.9%
+
+SEGMENT-LEVEL METRICS
+---------------------
+Mean Absolute Percentage Error (MAPE):  71.00%
+Forecast Bias:                          -71.00%
+Root Mean Squared Error (RMSE):         $34,797
+Hit Rate (within +/-20%):               0.0%
+
+Periods Analyzed:                       2
+
+INTERPRETATION
+--------------
+[--] Model shows moderate accuracy (25-50% error)
+[!!] OVER-FORECASTING: Check velocity calculation
+
+
+DATA-DERIVED BASELINES USED
+---------------------------
+  Large Market        : WR=0.0%, DSO=61d, Vel=0.40/mo
+  Mid Market          : WR=25.0%, DSO=61d, Vel=1.26/mo
+  Small Market        : WR=21.2%, DSO=58d, Vel=2.15/mo
+
+
+BACKTEST ASSUMPTIONS (NEUTRAL)
+------------------------------
+  volume_growth_multiplier                : 1.0
+  win_rate_uplift_multiplier              : 1.0
+  deal_size_inflation                     : 1.0
+  num_simulations                         : 500
+  velocity_smoothing_window               : 3
+  confidence_interval_clip                : 0.95
+
+
+RECOMMENDATION
+--------------
+[!!] Review velocity and DSO calculations.
+     Model may not have learned patterns correctly.
+
+======================================================================
