@@ -1,6 +1,6 @@
-scenario,volume_growth,win_rate_uplift,deal_size_inflation,annual_revenue_p10,annual_revenue_p50,annual_revenue_p90,annual_revenue_mean
-Pessimistic,1.0,1.0,1.0,14122780,19638345,26536642,19891153
-Conservative,1.05,1.02,1.01,16595985,21110093,26547528,21677708
-Base Case,1.1,1.05,1.03,17883866,23255993,31229063,23968448
-Optimistic,1.15,1.08,1.05,19651448,25530888,29527932,25110864
-Aggressive,1.2,1.1,1.07,19116790,25572446,32257091,26183741
+scenario,volume_growth,win_rate_uplift,deal_size_inflation,annual_revenue_p10,annual_revenue_p50,annual_revenue_p90,annual_volume_p50,revenue_range_millions
+Severe Downturn,0.9,0.95,0.97,6233870,7234952,8620301,47,$6.2M - $8.6M
+Conservative,0.95,0.98,0.99,6327917,7611221,9717247,49,$6.3M - $9.7M
+Base Case,1.1,1.05,1.03,7607328,9057806,11152200,56,$7.6M - $11.2M
+Optimistic,1.15,1.08,1.05,7752075,9856124,11708618,58,$7.8M - $11.7M
+Strong Growth,1.2,1.1,1.08,8564157,10286910,12383017,60,$8.6M - $12.4M
