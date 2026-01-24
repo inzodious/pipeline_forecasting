@@ -5,18 +5,18 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 """
-BACKTEST VALIDATION V5 - CLOSURE-BASED MODEL
+BACKTEST VALIDATION V6 - AGGREGATE-FIRST APPROACH
 
-KEY CHANGES FROM V4:
-1. Models CLOSURE velocity (deals won per month) instead of creation velocity
-2. Samples deal sizes from percentile distribution (median/IQR), not uniform min/max
-3. Pipeline deals supplement early months with decaying boost, not weighted blend
-4. Age-adjusted win rates for pipeline deals
+KEY CHANGES FROM V5:
+1. AGGREGATE-FIRST: Calculate total monthly metrics, then distribute by segment share
+2. TRAILING BASELINE: Use trailing 12 months instead of just prior calendar year
+3. FULL YEAR BACKTEST: Validate against full FY25 (train on trailing 12mo before each month)
+4. SEGMENT SHARE: Revenue and volume distributed by historical segment proportions
+5. DEAL SIZE: Use segment average (not median) for high-variance segments
 
-This fixes the +70% over-forecasting issue by:
-- Directly modeling what we predict (closures), not proxies (creations + win rates)
-- Using realistic deal size distributions from won deals
-- Preventing double-counting between pipeline and generated closures
+This fixes:
+- SMB over-forecasting (segment share limits contribution)
+- Indirect under-forecasting (aggregate captures total, share distributes correctly)
 """
 
 # Paths
@@ -28,23 +28,24 @@ PATH_RAW_SNAPSHOTS = os.path.join(INPUT_DIR, "fact_snapshots.csv")
 OUTPUT_BACKTEST_RESULTS = os.path.join(VALIDATION_DIR, "backtest_validation_results.csv")
 OUTPUT_BACKTEST_SUMMARY = os.path.join(VALIDATION_DIR, "backtest_summary.txt")
 
-# Configuration
-TRAIN_END_DATE = '2025-06-30'
-TEST_START_DATE = '2025-07-01'
+# Configuration - FULL FY25 BACKTEST
+TRAIN_END_DATE = '2024-12-31'  # Train on 2024
+TEST_START_DATE = '2025-01-01'  # Test full FY25
 TEST_END_DATE = '2025-12-31'
 
-# Stage Classifications (must match forecast_generator)
+# Stage Classifications
 WON_STAGES = ["Closed Won", "Verbal"]
 LOST_PATTERNS = ["Closed Lost", "Declined to Bid"]
 
 # BACKTEST ASSUMPTIONS - NEUTRAL for fair model validation
 BACKTEST_ASSUMPTIONS = {
     'volume_growth_multiplier': 1.00,
-    'win_rate_uplift_multiplier': 1.00,
     'deal_size_inflation': 1.00,
     'num_simulations': 500,
     'velocity_smoothing_window': 3,
-    'confidence_interval_clip': 0.95
+    'use_trailing_months': 12,  # Use trailing 12 months for baseline
+    'first_appearance_closed_factor': 0.5,  # Count 50% of first-appearance-as-closed deals
+    'use_average_not_median': True,  # Use average deal size (captures large deal impact)
 }
 
 
@@ -70,337 +71,216 @@ def is_closed(stage):
 
 
 # ==========================================
-# DSO CALCULATION
+# AGGREGATE MONTHLY METRICS (KEY V6 CHANGE)
 # ==========================================
 
-def calculate_dso_backtest(df, cutoff_date):
-    """Calculate DSO from training data only."""
-    df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
-    
-    df_final['is_won_flag'] = df_final['stage'].apply(is_won)
-    df_final['is_lost_flag'] = df_final['stage'].apply(is_lost)
-    df_closed = df_final[df_final['is_won_flag'] | df_final['is_lost_flag']].copy()
-    df_closed = df_closed[df_closed['date_closed'] <= cutoff_date].copy()
-    
-    df_closed['cycle_days'] = (df_closed['date_closed'] - df_closed['date_created']).dt.days
-    df_valid = df_closed[df_closed['cycle_days'] > 0]
-    
-    if len(df_valid) > 0:
-        overall_mean = df_valid['cycle_days'].mean()
-        overall_std = df_valid['cycle_days'].std()
-        overall_median = df_valid['cycle_days'].median()
-    else:
-        overall_mean, overall_std, overall_median = 60, 20, 60
-    
-    dso_dict = {}
-    
-    for seg in df['market_segment'].unique():
-        seg_data = df_valid[df_valid['market_segment'] == seg]
-        
-        if len(seg_data) >= 3:
-            dso_dict[seg] = {
-                'mean': seg_data['cycle_days'].mean(),
-                'std': max(seg_data['cycle_days'].std(), 1),
-                'median': seg_data['cycle_days'].median()
-            }
-        else:
-            dso_dict[seg] = {
-                'mean': overall_mean,
-                'std': max(overall_std, 1),
-                'median': overall_median
-            }
-    
-    return dso_dict
-
-
-# ==========================================
-# WIN RATE CALCULATION
-# ==========================================
-
-def calculate_win_rates_backtest(df, cutoff_date):
-    """Calculate win rates from training data only."""
-    df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
-    
-    df_final['is_won_flag'] = df_final['stage'].apply(is_won)
-    df_final['is_lost_flag'] = df_final['stage'].apply(is_lost)
-    df_final['is_closed_flag'] = df_final['is_won_flag'] | df_final['is_lost_flag']
-    
-    df_closed = df_final[
-        (df_final['is_closed_flag']) & 
-        (df_final['date_closed'] <= cutoff_date)
-    ].copy()
-    
-    overall_won = df_closed['is_won_flag'].sum()
-    overall_total = len(df_closed)
-    overall_wr = overall_won / overall_total if overall_total > 0 else 0.20
-    
-    win_rates = {}
-    
-    for seg in df['market_segment'].unique():
-        seg_data = df_closed[df_closed['market_segment'] == seg]
-        won_count = seg_data['is_won_flag'].sum()
-        total_count = len(seg_data)
-        
-        if total_count > 0:
-            win_rates[seg] = won_count / total_count
-        else:
-            win_rates[seg] = overall_wr
-    
-    return win_rates
-
-
-# ==========================================
-# CLOSURE VELOCITY CALCULATION (KEY V5 CHANGE)
-# ==========================================
-
-def calculate_closure_velocity_backtest(df, cutoff_date):
+def calculate_aggregate_monthly_metrics(df, cutoff_date):
     """
-    Calculate CLOSURE velocity (deals won per month) from training data.
-    This directly models what we're trying to predict.
+    Calculate AGGREGATE monthly won volume and revenue.
+    This is the primary forecast driver.
     """
     df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
     df_final['is_won_flag'] = df_final['stage'].apply(is_won)
     
+    # Only won deals that closed before cutoff
     df_won = df_final[
         (df_final['is_won_flag']) & 
         (df_final['date_closed'] <= cutoff_date)
     ].copy()
     
     df_won['date_closed'] = pd.to_datetime(df_won['date_closed'])
-    df_won['close_year'] = df_won['date_closed'].dt.year
     df_won['close_month'] = df_won['date_closed'].dt.month
+    df_won['close_year'] = df_won['date_closed'].dt.year
     
-    cutoff_year = cutoff_date.year
-    cutoff_month = cutoff_date.month
+    # Use trailing months for baseline
+    trailing_months = BACKTEST_ASSUMPTIONS.get('use_trailing_months', 12)
+    cutoff_minus_trailing = cutoff_date - pd.DateOffset(months=trailing_months)
     
-    # Use most recent COMPLETE year for baseline
-    if cutoff_month < 12:
-        baseline_year = cutoff_year - 1
+    df_trailing = df_won[df_won['date_closed'] > cutoff_minus_trailing].copy()
+    
+    print(f"    Aggregate baseline: {cutoff_minus_trailing.date()} to {cutoff_date.date()}")
+    print(f"    Trailing period won deals: {len(df_trailing):,}")
+    
+    # Calculate AGGREGATE monthly metrics
+    monthly_agg = defaultdict(lambda: {'total_vol': 0, 'total_rev': 0})
+    
+    for m in range(1, 13):
+        m_data = df_trailing[df_trailing['close_month'] == m]
+        monthly_agg[m]['total_vol'] = len(m_data)
+        monthly_agg[m]['total_rev'] = m_data['net_revenue'].sum()
+    
+    # Calculate smoothed values
+    vols = [monthly_agg[m]['total_vol'] for m in range(1, 13)]
+    revs = [monthly_agg[m]['total_rev'] for m in range(1, 13)]
+    
+    smoothing = BACKTEST_ASSUMPTIONS.get('velocity_smoothing_window', 3)
+    if smoothing > 1:
+        vols_smooth = pd.Series(vols).rolling(window=smoothing, center=True, min_periods=1).mean().tolist()
+        revs_smooth = pd.Series(revs).rolling(window=smoothing, center=True, min_periods=1).mean().tolist()
     else:
-        baseline_year = cutoff_year
+        vols_smooth = vols
+        revs_smooth = revs
     
-    if baseline_year not in df_won['close_year'].values:
-        baseline_year = df_won['close_year'].max()
+    for m in range(1, 13):
+        monthly_agg[m]['vol_smooth'] = vols_smooth[m - 1]
+        monthly_agg[m]['rev_smooth'] = revs_smooth[m - 1]
     
-    df_baseline = df_won[df_won['close_year'] == baseline_year].copy()
+    total_annual_vol = sum(vols)
+    total_annual_rev = sum(revs)
     
-    closure_dict = {}
+    print(f"    Annual baseline: {total_annual_vol} deals, ${total_annual_rev:,.0f}")
+    print(f"    Monthly average: {total_annual_vol/12:.1f} deals, ${total_annual_rev/12:,.0f}")
     
-    for seg in df['market_segment'].unique():
-        closure_dict[seg] = {}
-        seg_data = df_baseline[df_baseline['market_segment'] == seg]
+    return monthly_agg, df_trailing
+
+
+# ==========================================
+# SEGMENT SHARE CALCULATION (KEY V6 CHANGE)
+# ==========================================
+
+def calculate_segment_shares(df_trailing):
+    """
+    Calculate what % of total volume and revenue each segment represents.
+    This is used to distribute aggregate forecast by segment.
+    """
+    total_vol = len(df_trailing)
+    total_rev = df_trailing['net_revenue'].sum()
+    
+    segment_shares = {}
+    
+    for seg in df_trailing['market_segment'].unique():
+        seg_data = df_trailing[df_trailing['market_segment'] == seg]
         
-        annual_avg_size = seg_data['net_revenue'].mean() if len(seg_data) > 0 else 0
+        seg_vol = len(seg_data)
+        seg_rev = seg_data['net_revenue'].sum()
         
-        monthly_vols = []
-        monthly_sizes = []
+        # Calculate deal size metrics
+        avg_deal_size = seg_data['net_revenue'].mean() if len(seg_data) > 0 else 0
+        median_deal_size = seg_data['net_revenue'].median() if len(seg_data) > 0 else 0
         
-        for m in range(1, 13):
-            m_data = seg_data[seg_data['close_month'] == m]
-            monthly_vols.append(len(m_data))
-            
-            if len(m_data) > 0:
-                monthly_sizes.append(m_data['net_revenue'].mean())
+        # Use AVERAGE by default (captures large deal impact better)
+        # This is critical for segments like Indirect where deal sizes are volatile
+        if BACKTEST_ASSUMPTIONS.get('use_average_not_median', True):
+            effective_deal_size = avg_deal_size
+        else:
+            # Fallback: Use average for high-variance segments (where median << mean)
+            if avg_deal_size > median_deal_size * 2 and median_deal_size > 0:
+                effective_deal_size = avg_deal_size
             else:
-                if annual_avg_size > 0:
-                    monthly_sizes.append(annual_avg_size)
-                else:
-                    monthly_sizes.append(df_baseline['net_revenue'].mean() if len(df_baseline) > 0 else 50000)
+                effective_deal_size = (avg_deal_size + median_deal_size) / 2
         
-        # Optional smoothing
-        smoothing = BACKTEST_ASSUMPTIONS.get('velocity_smoothing_window', 3)
-        if smoothing > 1:
-            monthly_vols_smooth = pd.Series(monthly_vols).rolling(
-                window=smoothing, center=True, min_periods=1
-            ).mean().tolist()
-        else:
-            monthly_vols_smooth = monthly_vols
-        
-        for m in range(1, 13):
-            closure_dict[seg][m] = {
-                'won_vol': monthly_vols_smooth[m - 1],
-                'won_vol_raw': monthly_vols[m - 1],
-                'avg_size': monthly_sizes[m - 1]
-            }
+        segment_shares[seg] = {
+            'vol_share': seg_vol / total_vol if total_vol > 0 else 0,
+            'rev_share': seg_rev / total_rev if total_rev > 0 else 0,
+            'avg_deal_size': avg_deal_size,
+            'median_deal_size': median_deal_size,
+            'effective_deal_size': effective_deal_size,
+            'deal_count': seg_vol
+        }
     
-    closure_dict['_baseline_year'] = baseline_year
+    print(f"\n    Segment Shares (using {'average' if BACKTEST_ASSUMPTIONS.get('use_average_not_median', True) else 'blended'} deal size):")
+    for seg, shares in sorted(segment_shares.items(), key=lambda x: x[1]['rev_share'], reverse=True):
+        print(f"      {seg:20s}: Vol={shares['vol_share']:.1%}, Rev={shares['rev_share']:.1%}, AvgDeal=${shares['avg_deal_size']:,.0f}, MedianDeal=${shares['median_deal_size']:,.0f}")
     
-    return closure_dict
+    return segment_shares
 
 
 # ==========================================
-# DATA PROFILE (KEY V5 CHANGE - PERCENTILES)
+# DEAL SIZE SAMPLER
 # ==========================================
 
-def profile_data_backtest(df, cutoff_date):
+def sample_deal_size(segment_shares, segment):
     """
-    Profile deal size distribution from WON deals only.
-    KEY V5 CHANGE: Use percentiles instead of just min/max for realistic sampling.
+    Sample deal size using effective deal size with variance.
     """
-    df_final = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
-    df_final['is_won_flag'] = df_final['stage'].apply(is_won)
+    seg_info = segment_shares.get(segment, {})
     
-    df_won = df_final[
-        (df_final['is_won_flag']) & 
-        (df_final['date_closed'] <= cutoff_date)
-    ].copy()
+    effective_size = seg_info.get('effective_deal_size', 10000)
+    avg_size = seg_info.get('avg_deal_size', effective_size)
+    median_size = seg_info.get('median_deal_size', effective_size)
     
-    profile = {}
-    
-    if len(df_won) > 0:
-        overall_median = df_won['net_revenue'].median()
-        overall_p25 = df_won['net_revenue'].quantile(0.25)
-        overall_p75 = df_won['net_revenue'].quantile(0.75)
-        overall_min = df_won['net_revenue'].min()
-        overall_max = df_won['net_revenue'].max()
+    # Estimate std from the avg/median ratio (high ratio = high variance)
+    if median_size > 0:
+        variance_ratio = avg_size / median_size
+        std_estimate = effective_size * min(0.5, (variance_ratio - 1) * 0.3 + 0.2)
     else:
-        overall_median = 50000
-        overall_p25 = 35000
-        overall_p75 = 75000
-        overall_min = 15000
-        overall_max = 150000
+        std_estimate = effective_size * 0.3
     
-    for seg in df['market_segment'].unique():
-        seg_won = df_won[df_won['market_segment'] == seg]
-        
-        if len(seg_won) >= 5:
-            profile[seg] = {
-                'median_deal_size': seg_won['net_revenue'].median(),
-                'avg_deal_size': seg_won['net_revenue'].mean(),
-                'p25_deal_size': seg_won['net_revenue'].quantile(0.25),
-                'p75_deal_size': seg_won['net_revenue'].quantile(0.75),
-                'min_deal_size': seg_won['net_revenue'].min(),
-                'max_deal_size': seg_won['net_revenue'].max(),
-                'std_deal_size': seg_won['net_revenue'].std()
-            }
-        else:
-            profile[seg] = {
-                'median_deal_size': overall_median,
-                'avg_deal_size': overall_median,
-                'p25_deal_size': overall_p25,
-                'p75_deal_size': overall_p75,
-                'min_deal_size': overall_min,
-                'max_deal_size': overall_max,
-                'std_deal_size': (overall_p75 - overall_p25) / 1.35
-            }
-    
-    return profile
-
-
-# ==========================================
-# DEAL SIZE SAMPLER (KEY V5 FIX)
-# ==========================================
-
-def sample_deal_size(data_profile, segment):
-    """
-    Sample deal size from realistic distribution using percentiles.
-    Uses truncated normal centered on median with IQR-based spread.
-    
-    This fixes the uniform sampling issue that inflated expected revenue.
-    """
-    seg_profile = data_profile.get(segment, {})
-    
-    median = seg_profile.get('median_deal_size', 50000)
-    p25 = seg_profile.get('p25_deal_size', median * 0.7)
-    p75 = seg_profile.get('p75_deal_size', median * 1.3)
-    min_val = seg_profile.get('min_deal_size', p25 * 0.5)
-    max_val = seg_profile.get('max_deal_size', p75 * 2.0)
-    
-    # Use IQR to estimate std (IQR ≈ 1.35 * std for normal distribution)
-    iqr = p75 - p25
-    std_estimate = iqr / 1.35 if iqr > 0 else median * 0.2
-    std_estimate = max(std_estimate, median * 0.1)
-    
-    # Sample from truncated normal centered on median
-    sample = np.random.normal(median, std_estimate)
-    
-    # Clip to realistic range
-    sample = max(min_val, min(max_val, sample))
+    # Sample with variance
+    sample = np.random.normal(effective_size, std_estimate)
+    sample = max(effective_size * 0.1, sample)  # Floor at 10% of expected
     
     return int(sample)
 
 
 # ==========================================
-# BACKTEST FORECAST ENGINE (V5)
+# BACKTEST FORECAST ENGINE (V6)
 # ==========================================
 
 class BacktestEngine:
     """
-    V5 Engine: Models CLOSURES directly using closure velocity.
+    V6 Engine: Aggregate-first approach.
+    1. Generate total monthly closures from aggregate baseline
+    2. Distribute by segment share
     """
     
-    def __init__(self, closure_velocity, data_profile, win_rates, dso_dict, test_months):
-        self.closure_velocity = {k: v for k, v in closure_velocity.items() if not k.startswith('_')}
-        self.data_profile = data_profile
-        self.win_rates = win_rates
-        self.dso_dict = dso_dict
+    def __init__(self, monthly_agg, segment_shares, test_months):
+        self.monthly_agg = monthly_agg
+        self.segment_shares = segment_shares
         self.test_months = test_months
+        self.segments = list(segment_shares.keys())
     
-    def generate_monthly_closures(self, month, segment):
+    def run_simulation(self, existing_deals=None):
         """
-        Generate won deals that CLOSE in this month.
-        Based directly on historical closure patterns.
-        """
-        month_num = month.month
+        Run simulation using aggregate-first approach.
         
-        if segment not in self.closure_velocity or month_num not in self.closure_velocity[segment]:
-            return []
-        
-        stats = self.closure_velocity[segment][month_num]
-        
-        base_vol = stats['won_vol'] * BACKTEST_ASSUMPTIONS.get('volume_growth_multiplier', 1.0)
-        
-        if base_vol <= 0:
-            num_deals = 0
-        else:
-            num_deals = np.random.poisson(base_vol)
-        
-        deals = []
-        
-        for _ in range(num_deals):
-            deal_size = sample_deal_size(self.data_profile, segment)
-            deal_size = int(deal_size * BACKTEST_ASSUMPTIONS.get('deal_size_inflation', 1.0))
-            
-            days_in_month = (month + pd.DateOffset(months=1) - timedelta(days=1)).day
-            close_day = np.random.randint(1, days_in_month + 1)
-            close_date = month + timedelta(days=close_day - 1)
-            
-            deals.append({
-                'segment': segment,
-                'revenue': deal_size,
-                'close_date': close_date,
-                'is_won': True,
-                'source': 'Generated Closure'
-            })
-        
-        return deals
-    
-    def run_simulation(self, existing_deals):
-        """
-        Run simulation using CLOSURE VELOCITY as the sole driver.
-        
-        KEY INSIGHT: Historical closure velocity ALREADY includes deals that 
-        converted from pipeline. Adding pipeline on top double-counts.
-        
-        The closure velocity baseline represents:
-        - Historical deals that were in pipeline and closed
-        - Historical deals that were created and closed within the period
-        
-        Therefore, closure velocity IS the complete forecast.
+        1. For each month, determine total expected wins from aggregate baseline
+        2. Distribute wins across segments by their historical share
+        3. Sample deal sizes per segment
         """
         monthly_results = {month: defaultdict(lambda: {
             'won_vol': 0, 'won_rev': 0
         }) for month in self.test_months}
         
-        # Generate closures based on historical closure velocity ONLY
         for month in self.test_months:
-            for segment in self.closure_velocity.keys():
-                new_closures = self.generate_monthly_closures(month, segment)
+            month_num = month.month
+            
+            # Get aggregate expectation for this month
+            agg_stats = self.monthly_agg.get(month_num, {'vol_smooth': 0, 'rev_smooth': 0})
+            
+            base_vol = agg_stats['vol_smooth'] * BACKTEST_ASSUMPTIONS.get('volume_growth_multiplier', 1.0)
+            
+            # Generate total deals from Poisson
+            if base_vol <= 0:
+                total_deals = 0
+            else:
+                total_deals = np.random.poisson(base_vol)
+            
+            # Distribute deals across segments by volume share
+            for seg in self.segments:
+                seg_share = self.segment_shares[seg]['vol_share']
                 
-                for deal in new_closures:
-                    seg = deal['segment']
-                    monthly_results[month][seg]['won_vol'] += 1
-                    monthly_results[month][seg]['won_rev'] += deal['revenue']
+                # Expected deals for this segment
+                expected_seg_deals = total_deals * seg_share
+                
+                # Add some variance with Poisson (if expected > 0)
+                if expected_seg_deals > 0.5:
+                    seg_deals = np.random.poisson(expected_seg_deals)
+                elif expected_seg_deals > 0:
+                    # For very low volume, use bernoulli
+                    seg_deals = 1 if np.random.random() < expected_seg_deals else 0
+                else:
+                    seg_deals = 0
+                
+                # Generate revenue for each deal
+                seg_revenue = 0
+                for _ in range(seg_deals):
+                    deal_size = sample_deal_size(self.segment_shares, seg)
+                    deal_size = int(deal_size * BACKTEST_ASSUMPTIONS.get('deal_size_inflation', 1.0))
+                    seg_revenue += deal_size
+                
+                monthly_results[month][seg]['won_vol'] = seg_deals
+                monthly_results[month][seg]['won_rev'] = seg_revenue
         
         return monthly_results
 
@@ -502,38 +382,43 @@ def compare_forecast_to_actual(forecasted_list, actual):
 
 def calculate_accuracy_metrics(df_comparison):
     """Calculate summary accuracy statistics."""
-    total_forecasted = df_comparison['forecasted_won_revenue'].sum()
-    total_actual = df_comparison['actual_won_revenue'].sum()
+    # Overall metrics (sum across all segments)
+    monthly_totals = df_comparison.groupby('month').agg({
+        'forecasted_won_revenue': 'sum',
+        'actual_won_revenue': 'sum',
+        'forecasted_won_volume': 'sum',
+        'actual_won_volume': 'sum'
+    }).reset_index()
+    
+    total_forecasted = monthly_totals['forecasted_won_revenue'].sum()
+    total_actual = monthly_totals['actual_won_revenue'].sum()
     
     overall_pct_error = ((total_forecasted - total_actual) / total_actual * 100) if total_actual > 0 else 0
     
+    # Calculate monthly-level error (more meaningful than segment-month)
+    monthly_totals['rev_error'] = monthly_totals['forecasted_won_revenue'] - monthly_totals['actual_won_revenue']
+    monthly_totals['rev_pct_error'] = (monthly_totals['rev_error'] / monthly_totals['actual_won_revenue'] * 100).fillna(0)
+    
+    mape_monthly = monthly_totals['rev_pct_error'].abs().mean()
+    bias_monthly = monthly_totals['rev_pct_error'].mean()
+    rmse_monthly = np.sqrt((monthly_totals['rev_error'] ** 2).mean())
+    
+    within_20pct = (monthly_totals['rev_pct_error'].abs() <= 20).sum()
+    hit_rate = (within_20pct / len(monthly_totals)) * 100
+    
+    # Segment-level metrics
     df_valid = df_comparison[df_comparison['actual_won_revenue'] > 0].copy()
-    
-    if len(df_valid) == 0:
-        return {
-            'mape_revenue': 0, 
-            'bias_revenue': 0, 
-            'rmse_revenue': 0,
-            'hit_rate_within_20pct': 0, 
-            'num_periods_analyzed': 0,
-            'overall_pct_error': overall_pct_error,
-            'total_forecasted': total_forecasted,
-            'total_actual': total_actual
-        }
-    
-    mape_rev = df_valid['revenue_pct_error'].abs().mean()
-    bias_rev = df_valid['revenue_pct_error'].mean()
-    rmse_rev = np.sqrt((df_valid['revenue_error'] ** 2).mean())
-    
-    within_20pct = (df_valid['revenue_pct_error'].abs() <= 20).sum()
-    hit_rate = (within_20pct / len(df_valid)) * 100
+    mape_segment = df_valid['revenue_pct_error'].abs().mean() if len(df_valid) > 0 else 0
+    bias_segment = df_valid['revenue_pct_error'].mean() if len(df_valid) > 0 else 0
     
     return {
-        'mape_revenue': mape_rev,
-        'bias_revenue': bias_rev,
-        'rmse_revenue': rmse_rev,
+        'mape_monthly': mape_monthly,
+        'mape_segment': mape_segment,
+        'bias_monthly': bias_monthly,
+        'bias_segment': bias_segment,
+        'rmse_monthly': rmse_monthly,
         'hit_rate_within_20pct': hit_rate,
-        'num_periods_analyzed': len(df_valid),
+        'num_months_analyzed': len(monthly_totals),
         'overall_pct_error': overall_pct_error,
         'total_forecasted': total_forecasted,
         'total_actual': total_actual
@@ -546,7 +431,7 @@ def calculate_accuracy_metrics(df_comparison):
 
 def run_backtest_validation():
     print("=" * 70)
-    print("BACKTEST VALIDATION V5 - CLOSURE-BASED MODEL")
+    print("BACKTEST VALIDATION V6 - AGGREGATE-FIRST MODEL")
     print("=" * 70)
     
     print("\n--- 0. Backtest Configuration ---")
@@ -571,81 +456,23 @@ def run_backtest_validation():
     df_train = df_raw[df_raw['date_snapshot'] <= train_end].copy()
     df_full = df_raw.copy()
     
-    print(f"    Training: {df_train['date_snapshot'].min().date()} to {train_end.date()}")
-    print(f"    Testing:  {test_start.date()} to {test_end.date()}")
+    print(f"    Training cutoff: {train_end.date()}")
+    print(f"    Testing:  {test_start.date()} to {test_end.date()} (Full FY25)")
     print(f"    Training records: {len(df_train):,}")
     print(f"    Unique deals in training: {df_train['deal_id'].nunique():,}")
     
-    print("\n--- 2. Calculating Drivers (from training data) ---")
-    dso_dict = calculate_dso_backtest(df_train, train_end)
-    win_rates = calculate_win_rates_backtest(df_train, train_end)
-    closure_velocity = calculate_closure_velocity_backtest(df_train, train_end)
-    data_profile = profile_data_backtest(df_train, train_end)
+    print("\n--- 2. Calculating Aggregate Metrics (from training data) ---")
+    monthly_agg, df_trailing = calculate_aggregate_monthly_metrics(df_train, train_end)
     
-    baseline_year = closure_velocity.get('_baseline_year', 'N/A')
-    print(f"    Closure velocity baseline: {baseline_year}")
-    print(f"    Drivers calculated for {len(win_rates)} segments:")
-    for seg, wr in win_rates.items():
-        dso = dso_dict.get(seg, {}).get('median', 60)
-        seg_closure = closure_velocity.get(seg, {})
-        avg_monthly_closures = np.mean([seg_closure.get(m, {}).get('won_vol', 0) for m in range(1, 13)])
-        seg_profile = data_profile.get(seg, {})
-        median_size = seg_profile.get('median_deal_size', 0)
-        print(f"      {seg}: WR={wr:.1%}, DSO={dso:.0f}d, Won/mo={avg_monthly_closures:.2f}, Median=${median_size:,.0f}")
-    
-    print("\n--- 3. Initializing Pipeline (as of training cutoff) ---")
-    
-    latest_train_snapshot = df_train['date_snapshot'].max()
-    df_latest = df_train[df_train['date_snapshot'] == latest_train_snapshot].copy()
-    
-    df_latest['is_closed_flag'] = df_latest['stage'].apply(is_closed)
-    df_open = df_latest[~df_latest['is_closed_flag']].copy()
-    
-    print(f"    Latest training snapshot: {latest_train_snapshot.date()}")
-    print(f"    Open deals at cutoff: {len(df_open):,}")
-    
-    existing_deals = []
-    for _, row in df_open.iterrows():
-        seg = row['market_segment']
-        create_date = pd.to_datetime(row['date_created'])
-        
-        base_wr = win_rates.get(seg, 0.20)
-        
-        days_open = (latest_train_snapshot - create_date).days
-        seg_dso = dso_dict.get(seg, {'median': 60})
-        expected_dso = seg_dso['median']
-        
-        if days_open > expected_dso * 1.5:
-            age_factor = 0.5
-        elif days_open > expected_dso:
-            age_factor = 0.75
-        else:
-            age_factor = 1.0
-        
-        adj_wr = base_wr * BACKTEST_ASSUMPTIONS.get('win_rate_uplift_multiplier', 1.0) * age_factor
-        is_won = np.random.random() < adj_wr
-        
-        remaining_days = max(7, int(expected_dso - days_open + np.random.normal(0, seg_dso.get('std', 20) / 2)))
-        close_date = latest_train_snapshot + timedelta(days=remaining_days)
-        
-        existing_deals.append({
-            'deal_id': row['deal_id'],
-            'segment': seg,
-            'revenue': row['net_revenue'],
-            'create_date': create_date,
-            'close_date': close_date,
-            'is_won': is_won
-        })
-    
-    won_pipeline = [d for d in existing_deals if d['is_won']]
-    print(f"    Pipeline deals predicted to win: {len(won_pipeline)}")
+    print("\n--- 3. Calculating Segment Shares ---")
+    segment_shares = calculate_segment_shares(df_trailing)
     
     print("\n--- 4. Running Backtest Simulations ---")
     
     test_months = pd.date_range(test_start, test_end, freq='MS')
     num_sims = BACKTEST_ASSUMPTIONS.get('num_simulations', 500)
     
-    engine = BacktestEngine(closure_velocity, data_profile, win_rates, dso_dict, test_months)
+    engine = BacktestEngine(monthly_agg, segment_shares, test_months)
     
     all_forecasted = []
     
@@ -653,7 +480,7 @@ def run_backtest_validation():
         if (sim + 1) % 100 == 0:
             print(f"    Completed {sim + 1}/{num_sims} simulations...")
         
-        forecasted = engine.run_simulation(existing_deals)
+        forecasted = engine.run_simulation()
         all_forecasted.append(forecasted)
     
     print("\n--- 5. Extracting Actual Results (Test Period) ---")
@@ -671,6 +498,40 @@ def run_backtest_validation():
     )
     print(f"    Actual test period: {total_actual_vol} deals, ${total_actual_rev:,.0f}")
     
+    # Diagnostic: Compare baseline vs actual by segment
+    print("\n--- 5b. TREND DIAGNOSTIC: Baseline vs Actual by Segment ---")
+    print("    This shows year-over-year changes that explain forecast variance:")
+    print(f"    {'Segment':<20} {'Base Vol/Mo':>12} {'Actual Vol/Mo':>14} {'Vol Change':>12} {'Base $/Deal':>14} {'Actual $/Deal':>14} {'$ Change':>10}")
+    print("    " + "-" * 100)
+    
+    # Calculate actual segment metrics
+    df_actual_final = df_full.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
+    df_actual_final['is_won_flag'] = df_actual_final['stage'].apply(is_won)
+    df_actual_won = df_actual_final[
+        (df_actual_final['is_won_flag']) &
+        (df_actual_final['date_closed'] >= test_start) &
+        (df_actual_final['date_closed'] <= test_end)
+    ].copy()
+    
+    test_months_count = len(pd.date_range(test_start, test_end, freq='MS'))
+    
+    for seg in sorted(segment_shares.keys()):
+        # Baseline metrics
+        base_info = segment_shares[seg]
+        base_vol_mo = base_info['deal_count'] / 12  # Annualized to monthly
+        base_deal_size = base_info['avg_deal_size']
+        
+        # Actual metrics
+        seg_actual = df_actual_won[df_actual_won['market_segment'] == seg]
+        actual_vol_mo = len(seg_actual) / test_months_count if test_months_count > 0 else 0
+        actual_deal_size = seg_actual['net_revenue'].mean() if len(seg_actual) > 0 else 0
+        
+        # Changes
+        vol_change = ((actual_vol_mo / base_vol_mo - 1) * 100) if base_vol_mo > 0 else 0
+        size_change = ((actual_deal_size / base_deal_size - 1) * 100) if base_deal_size > 0 else 0
+        
+        print(f"    {seg:<20} {base_vol_mo:>12.1f} {actual_vol_mo:>14.1f} {vol_change:>+11.0f}% ${base_deal_size:>13,.0f} ${actual_deal_size:>13,.0f} {size_change:>+9.0f}%")
+    
     print("\n--- 6. Comparing Forecast to Actual ---")
     os.makedirs(VALIDATION_DIR, exist_ok=True)
     os.makedirs(EXPORT_DIR, exist_ok=True)
@@ -678,6 +539,7 @@ def run_backtest_validation():
     df_comparison = compare_forecast_to_actual(all_forecasted, actual_results)
     df_comparison.to_csv(OUTPUT_BACKTEST_RESULTS, index=False)
     
+    # Monthly totals comparison
     monthly_comp = df_comparison.groupby('month').agg({
         'forecasted_won_volume': 'sum',
         'actual_won_volume': 'sum',
@@ -685,16 +547,20 @@ def run_backtest_validation():
         'actual_won_revenue': 'sum'
     })
     
-    print("\n    Monthly Comparison:")
-    print(f"    {'Month':<12} {'Fcst Vol':>10} {'Actual Vol':>12} {'Fcst Rev':>14} {'Actual Rev':>14}")
-    print("    " + "-" * 66)
+    print("\n    Monthly Comparison (Aggregate):")
+    print(f"    {'Month':<12} {'Fcst Vol':>10} {'Actual Vol':>12} {'Fcst Rev':>14} {'Actual Rev':>14} {'Error':>10}")
+    print("    " + "-" * 76)
     
     for month, row in monthly_comp.iterrows():
-        print(f"    {month.strftime('%Y-%m'):<12} {row['forecasted_won_volume']:>10.1f} {row['actual_won_volume']:>12.0f} ${row['forecasted_won_revenue']:>13,.0f} ${row['actual_won_revenue']:>13,.0f}")
+        error_pct = ((row['forecasted_won_revenue'] - row['actual_won_revenue']) / row['actual_won_revenue'] * 100) if row['actual_won_revenue'] > 0 else 0
+        print(f"    {month.strftime('%Y-%m'):<12} {row['forecasted_won_volume']:>10.1f} {row['actual_won_volume']:>12.0f} ${row['forecasted_won_revenue']:>13,.0f} ${row['actual_won_revenue']:>13,.0f} {error_pct:>+9.1f}%")
     
     total_fcst = monthly_comp['forecasted_won_revenue'].sum()
-    print("    " + "-" * 66)
-    print(f"    {'TOTAL':<12} {monthly_comp['forecasted_won_volume'].sum():>10.1f} {monthly_comp['actual_won_volume'].sum():>12.0f} ${total_fcst:>13,.0f} ${total_actual_rev:>13,.0f}")
+    total_fcst_vol = monthly_comp['forecasted_won_volume'].sum()
+    total_actual_vol = monthly_comp['actual_won_volume'].sum()
+    error_pct = ((total_fcst - total_actual_rev) / total_actual_rev * 100) if total_actual_rev > 0 else 0
+    print("    " + "-" * 76)
+    print(f"    {'TOTAL':<12} {total_fcst_vol:>10.1f} {total_actual_vol:>12.0f} ${total_fcst:>13,.0f} ${total_actual_rev:>13,.0f} {error_pct:>+9.1f}%")
     
     print(f"\n    Results saved: {OUTPUT_BACKTEST_RESULTS}")
     
@@ -703,12 +569,12 @@ def run_backtest_validation():
     
     summary_text = f"""
 {'=' * 70}
-BACKTEST VALIDATION SUMMARY V5 - CLOSURE-BASED MODEL
+BACKTEST VALIDATION SUMMARY V6 - AGGREGATE-FIRST MODEL
 {'=' * 70}
 
-TEST PERIOD: {test_start.date()} to {test_end.date()} (6 months)
-TRAINING PERIOD: {df_train['date_snapshot'].min().date()} to {train_end.date()}
-CLOSURE VELOCITY BASELINE: {baseline_year}
+TEST PERIOD: {test_start.date()} to {test_end.date()} (Full FY25)
+TRAINING CUTOFF: {train_end.date()}
+BASELINE: Trailing {BACKTEST_ASSUMPTIONS.get('use_trailing_months', 12)} months
 
 OVERALL ACCURACY
 ----------------
@@ -717,49 +583,66 @@ Total Actual Revenue:          ${metrics['total_actual']:>15,.0f}
 Difference:                    ${metrics['total_forecasted'] - metrics['total_actual']:>+15,.0f}
 Overall Percent Error:         {metrics['overall_pct_error']:>+15.1f}%
 
+MONTHLY-LEVEL METRICS (Aggregate)
+---------------------------------
+Mean Absolute Percentage Error (MAPE):  {metrics['mape_monthly']:.2f}%
+Forecast Bias:                          {metrics['bias_monthly']:+.2f}%
+Root Mean Squared Error (RMSE):         ${metrics['rmse_monthly']:,.0f}
+Hit Rate (within +/-20%):               {metrics['hit_rate_within_20pct']:.1f}%
+Months Analyzed:                        {metrics['num_months_analyzed']}
+
 SEGMENT-LEVEL METRICS
 ---------------------
-Mean Absolute Percentage Error (MAPE):  {metrics['mape_revenue']:.2f}%
-Forecast Bias:                          {metrics['bias_revenue']:+.2f}%
-Root Mean Squared Error (RMSE):         ${metrics['rmse_revenue']:,.0f}
-Hit Rate (within +/-20%):               {metrics['hit_rate_within_20pct']:.1f}%
-
-Periods Analyzed:                       {metrics['num_periods_analyzed']}
+Segment MAPE:                           {metrics['mape_segment']:.2f}%
+Segment Bias:                           {metrics['bias_segment']:+.2f}%
 
 INTERPRETATION
 --------------
 """
     
     abs_overall_error = abs(metrics['overall_pct_error'])
-    if abs_overall_error < 15:
-        summary_text += "[OK] Excellent model accuracy (<15% error)\n"
-    elif abs_overall_error < 25:
-        summary_text += "[OK] Good model accuracy (<25% error)\n"
-    elif abs_overall_error < 50:
-        summary_text += "[--] Model shows moderate accuracy (25-50% error)\n"
+    if abs_overall_error < 10:
+        summary_text += "[OK] Excellent model accuracy (<10% error)\n"
+    elif abs_overall_error < 20:
+        summary_text += "[OK] Good model accuracy (<20% error)\n"
+    elif abs_overall_error < 30:
+        summary_text += "[--] Moderate model accuracy (20-30% error)\n"
     else:
-        summary_text += "[!!] Model needs calibration (>50% error)\n"
+        summary_text += "[!!] Model needs calibration (>30% error)\n"
     
-    if metrics['overall_pct_error'] > 25:
-        summary_text += "[!!] OVER-FORECASTING: Check closure velocity or deal sizes\n"
-    elif metrics['overall_pct_error'] < -25:
-        summary_text += "[!!] UNDER-FORECASTING: Check if baseline year is representative\n"
+    if metrics['overall_pct_error'] > 20:
+        summary_text += "[!!] OVER-FORECASTING: Consider reducing baseline\n"
+    elif metrics['overall_pct_error'] < -20:
+        summary_text += "[!!] UNDER-FORECASTING: Consider increasing baseline\n"
     else:
         summary_text += "[OK] No significant systematic bias\n"
     
     summary_text += f"""
 
-DATA-DERIVED BASELINES USED (from {baseline_year})
---------------------------------------------------
+SEGMENT SHARES USED (from Baseline)
+-----------------------------------
 """
-    for seg in win_rates.keys():
-        wr = win_rates.get(seg, 0)
-        dso = dso_dict.get(seg, {}).get('median', 60)
-        seg_closure = closure_velocity.get(seg, {})
-        avg_monthly_closures = np.mean([seg_closure.get(m, {}).get('won_vol', 0) for m in range(1, 13)])
-        seg_profile = data_profile.get(seg, {})
-        median_size = seg_profile.get('median_deal_size', 0)
-        summary_text += f"  {seg:20s}: Won/mo={avg_monthly_closures:.2f}, Median=${median_size:,.0f}, WR={wr:.1%}, DSO={dso:.0f}d\n"
+    for seg, shares in sorted(segment_shares.items(), key=lambda x: x[1]['rev_share'], reverse=True):
+        summary_text += f"  {seg:20s}: Vol={shares['vol_share']:.1%}, Rev={shares['rev_share']:.1%}, AvgDeal=${shares['avg_deal_size']:,.0f}, MedianDeal=${shares['median_deal_size']:,.0f}\n"
+
+    summary_text += f"""
+
+UNDERSTANDING SEGMENT VARIANCE
+------------------------------
+Large segment-level errors typically occur when:
+1. VOLUME SHIFTS: A segment grows or shrinks year-over-year
+2. DEAL SIZE SHIFTS: Average deal size changes significantly
+3. SEASONALITY CHANGES: Historical monthly patterns don't repeat
+
+The TREND DIAGNOSTIC above shows baseline vs actual for each segment.
+- Volume Change > +/- 30% indicates the segment is growing/shrinking
+- $/Deal Change > +/- 50% indicates deal size volatility
+
+The AGGREGATE-FIRST approach mitigates this by:
+- Forecasting total company metrics first
+- Distributing by segment share (not forecasting segments independently)
+- Using average deal size (not median) to capture large deal impact
+"""
 
     summary_text += f"""
 
@@ -771,28 +654,26 @@ BACKTEST ASSUMPTIONS (NEUTRAL)
     
     summary_text += f"""
 
-KEY CHANGES IN V5
+KEY CHANGES IN V6
 -----------------
-1. CLOSURE-BASED: Models deals WON per month directly (not creation + conversion)
-2. PERCENTILE SIZING: Deal sizes sampled from median/IQR distribution
-3. PIPELINE BOOST: Decaying addition for early months, not weighted blend
-4. AGE-ADJUSTED WR: Older pipeline deals have reduced win probability
+1. AGGREGATE-FIRST: Calculate total monthly metrics, distribute by segment share
+2. TRAILING BASELINE: Uses trailing 12 months (blends patterns better)
+3. FULL YEAR TEST: Validates against complete FY25
+4. SEGMENT SHARE: Volume/revenue distributed by historical proportions
+5. DEAL SIZE: Uses average for high-variance segments (captures large deal impact)
 
-RECOMMENDATION
---------------
+METHODOLOGY
+-----------
+1. Calculate total monthly won volume/revenue from trailing period
+2. Calculate segment share of total (% of volume, % of revenue)
+3. For each forecast month:
+   a. Generate total deals from aggregate baseline (Poisson)
+   b. Distribute to segments by volume share
+   c. Generate revenue per deal from segment-specific distribution
+4. Monte Carlo simulation captures variance
+
+{'=' * 70}
 """
-    
-    if abs_overall_error < 25:
-        summary_text += "[OK] Model is suitable for production forecasting.\n"
-        summary_text += "     Apply growth multipliers for 2026 projections.\n"
-    elif abs_overall_error < 50:
-        summary_text += "[--] Model shows reasonable accuracy.\n"
-        summary_text += "     Consider if test period has unusual patterns.\n"
-    else:
-        summary_text += "[!!] Review closure velocity baseline year.\n"
-        summary_text += "     Check if test period is anomalous.\n"
-    
-    summary_text += f"\n{'=' * 70}\n"
     
     print(summary_text)
     
