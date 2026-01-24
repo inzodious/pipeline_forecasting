@@ -4,36 +4,38 @@ BACKTEST VALIDATION SUMMARY V5 - CLOSURE-BASED MODEL
 ======================================================================
 
 TEST PERIOD: 2025-07-01 to 2025-12-31 (6 months)
-TRAINING PERIOD: 2024-01-01 to 2025-06-30
+TRAINING PERIOD: 2024-01-05 to 2025-06-30
 CLOSURE VELOCITY BASELINE: 2024
 
 OVERALL ACCURACY
 ----------------
-Total Forecasted Revenue:      $      3,422,738
-Total Actual Revenue:          $      3,250,944
-Difference:                    $       +171,794
-Overall Percent Error:                    +5.3%
+Total Forecasted Revenue:      $     10,332,902
+Total Actual Revenue:          $     12,475,699
+Difference:                    $     -2,142,797
+Overall Percent Error:                   -17.2%
 
 SEGMENT-LEVEL METRICS
 ---------------------
-Mean Absolute Percentage Error (MAPE):  89.02%
-Forecast Bias:                          +36.25%
-Root Mean Squared Error (RMSE):         $229,512
-Hit Rate (within +/-20%):               0.0%
+Mean Absolute Percentage Error (MAPE):  157.76%
+Forecast Bias:                          +104.93%
+Root Mean Squared Error (RMSE):         $323,332
+Hit Rate (within +/-20%):               17.4%
 
-Periods Analyzed:                       13
+Periods Analyzed:                       23
 
 INTERPRETATION
 --------------
-[OK] Excellent model accuracy (<15% error)
+[OK] Good model accuracy (<25% error)
 [OK] No significant systematic bias
 
 
 DATA-DERIVED BASELINES USED (from 2024)
 --------------------------------------------------
-  Large Market        : Won/mo=0.51, Median=$306,216, WR=17.2%, DSO=83d
-  Mid Market          : Won/mo=2.53, Median=$107,152, WR=25.9%, DSO=57d
-  Small Market        : Won/mo=3.28, Median=$27,178, WR=23.6%, DSO=44d
+  Large Market        : Won/mo=3.49, Median=$205,320, WR=100.0%, DSO=122d
+  Indirect            : Won/mo=24.65, Median=$1,701, WR=98.0%, DSO=4d
+  Mid Market          : Won/mo=22.04, Median=$16,692, WR=99.1%, DSO=72d
+  SMB                 : Won/mo=16.71, Median=$5,580, WR=98.7%, DSO=37d
+  Other               : Won/mo=0.10, Median=$5,840, WR=100.0%, DSO=29d
 
 
 BACKTEST ASSUMPTIONS (NEUTRAL)
