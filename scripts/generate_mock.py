@@ -9,11 +9,36 @@ def generate_mock_data(output_path='data/fact_snapshots.csv', seed=42):
     np.random.seed(seed)
     
     segments = {
-        'Large Market': {'deals_per_month': 8, 'avg_revenue': 150000, 'revenue_std': 50000, 'win_rate': 0.35, 'avg_days': 120, 'days_std': 45},
-        'Mid Market/SMB': {'deals_per_month': 25, 'avg_revenue': 35000, 'revenue_std': 15000, 'win_rate': 0.45, 'avg_days': 60, 'days_std': 25},
-        'Indirect': {'deals_per_month': 15, 'avg_revenue': 20000, 'revenue_std': 8000, 'win_rate': 0.50, 'avg_days': 45, 'days_std': 20},
+        'Large Market': {
+            'deals_per_month': 6,
+            'avg_revenue': 180000,
+            'revenue_std': 60000,
+            'win_rate': 0.32,
+            'avg_days': 140,
+            'days_std': 50,
+            'qualified_entry_rate': 0.70,
+        },
+        'Mid Market/SMB': {
+            'deals_per_month': 20,
+            'avg_revenue': 40000,
+            'revenue_std': 18000,
+            'win_rate': 0.42,
+            'avg_days': 65,
+            'days_std': 28,
+            'qualified_entry_rate': 0.68,
+        },
+        'Indirect': {
+            'deals_per_month': 22,
+            'avg_revenue': 55000,
+            'revenue_std': 35000,
+            'win_rate': 0.48,
+            'avg_days': 50,
+            'days_std': 22,
+            'qualified_entry_rate': 0.65,
+        },
     }
-    stage_durations = {'Qualified': (14, 30), 'Alignment': (7, 21), 'Solutioning': (14, 45)}
+    
+    stage_durations = {'Qualified': (14, 35), 'Alignment': (7, 28), 'Solutioning': (14, 50)}
     
     start_date = pd.to_datetime('2024-01-01')
     end_date = pd.to_datetime('2025-12-31')
@@ -24,23 +49,29 @@ def generate_mock_data(output_path='data/fact_snapshots.csv', seed=42):
     
     for month_start in months:
         for segment, seg in segments.items():
-            for _ in range(max(1, int(np.random.poisson(seg['deals_per_month'])))):
+            num_deals = max(1, int(np.random.poisson(seg['deals_per_month'])))
+            
+            for _ in range(num_deals):
                 created_date = month_start + timedelta(days=random.randint(0, 27))
                 if created_date > end_date:
                     continue
                 
-                is_skipper = random.random() < 0.15
+                enters_qualified = random.random() < seg['qualified_entry_rate']
                 will_win = random.random() < seg['win_rate']
                 days_to_close = max(7, int(np.random.normal(seg['avg_days'], seg['days_std'])))
                 revenue = max(5000, np.random.normal(seg['avg_revenue'], seg['revenue_std']))
                 
                 lifecycle = []
-                if is_skipper:
+                
+                if not enters_qualified and not will_win:
                     close_date = created_date + timedelta(days=random.randint(1, 14))
                     lifecycle.append({'stage': 'Closed Lost', 'start_date': created_date, 'end_date': close_date})
+                elif not enters_qualified and will_win:
+                    close_date = created_date + timedelta(days=random.randint(7, 30))
+                    lifecycle.append({'stage': 'Closed Won', 'start_date': close_date, 'end_date': None})
                 else:
                     current_date = created_date
-                    num_stages = random.choices([1, 2, 3], weights=[0.1, 0.3, 0.6] if will_win else [0.4, 0.35, 0.25])[0]
+                    num_stages = random.choices([1, 2, 3], weights=[0.15, 0.30, 0.55] if will_win else [0.40, 0.35, 0.25])[0]
                     remaining_days = days_to_close
                     
                     for i, stage in enumerate(['Qualified', 'Alignment', 'Solutioning'][:num_stages]):

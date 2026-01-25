@@ -7,6 +7,16 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # =============================================================================
+# PIPELINE PARAMETERS (Fabric pipeline will override these)
+# =============================================================================
+
+GENERATE_MOCK = False
+RUN_BACKTEST = False
+SCENARIO = 'base'
+BACKTEST_DATE = '2025-01-01'
+ACTUALS_THROUGH = '2025-12-31'
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -287,15 +297,12 @@ def aggregate_forecasts(active_pipeline_forecast, closure_projections, config):
             ]
             
             monthly_forecast.append({
-                'forecast_month': forecast_month,
+                'forecast_month': str(forecast_month),
                 'market_segment': segment,
-                'active_pipeline_deals': len(active_seg),
-                'active_pipeline_revenue': active_seg['net_revenue'].sum(),
-                'active_expected_revenue': active_seg['expected_revenue'].sum(),
-                'future_pipeline_deals': future_seg['closure_probability'].sum(),
-                'future_expected_revenue': future_seg['expected_revenue'].sum(),
-                'total_expected_revenue': active_seg['expected_revenue'].sum() + future_seg['expected_revenue'].sum(),
-                'total_expected_deals': len(active_seg) + future_seg['closure_probability'].sum()
+                'open_pipeline_deal_count': len(active_seg),
+                'open_pipeline_revenue': active_seg['net_revenue'].sum(),
+                'expected_won_deal_count': active_seg['adjusted_probability'].sum() + future_seg['closure_probability'].sum(),
+                'expected_won_revenue': active_seg['expected_revenue'].sum() + future_seg['expected_revenue'].sum(),
             })
     
     return pd.DataFrame(monthly_forecast)
@@ -337,30 +344,35 @@ def run_backtest(df, deal_summary, config, scenario, backtest_date, actuals_thro
     ]
     
     actual_by_segment = actual_closed.groupby('market_segment').agg({'deal_id': 'count', 'net_revenue': 'sum'}).reset_index()
-    actual_by_segment.columns = ['market_segment', 'actual_deals', 'actual_revenue']
+    actual_by_segment.columns = ['market_segment', 'actual_won_deal_count', 'actual_won_revenue']
     
-    active_by_segment = active_forecast.groupby('market_segment').agg({'deal_id': 'count', 'expected_revenue': 'sum'}).reset_index()
-    active_by_segment.columns = ['market_segment', 'active_forecast_deals', 'active_forecast_revenue']
+    active_by_segment = active_forecast.groupby('market_segment').agg({
+        'adjusted_probability': 'sum',
+        'expected_revenue': 'sum'
+    }).reset_index()
+    active_by_segment.columns = ['market_segment', 'active_expected_deals', 'active_expected_revenue']
     
-    future_by_segment = future_in_period.groupby('market_segment').agg({'closure_probability': 'sum', 'expected_revenue': 'sum'}).reset_index()
-    future_by_segment.columns = ['market_segment', 'future_forecast_deals', 'future_forecast_revenue']
+    future_by_segment = future_in_period.groupby('market_segment').agg({
+        'closure_probability': 'sum',
+        'expected_revenue': 'sum'
+    }).reset_index()
+    future_by_segment.columns = ['market_segment', 'future_expected_deals', 'future_expected_revenue']
     
     comparison = pd.merge(actual_by_segment, active_by_segment, on='market_segment', how='outer')
     comparison = pd.merge(comparison, future_by_segment, on='market_segment', how='outer').fillna(0)
-    comparison['total_forecast_revenue'] = comparison['active_forecast_revenue'] + comparison['future_forecast_revenue']
+    comparison['forecast_won_deal_count'] = comparison['active_expected_deals'] + comparison['future_expected_deals']
+    comparison['forecast_won_revenue'] = comparison['active_expected_revenue'] + comparison['future_expected_revenue']
     comparison['revenue_variance_pct'] = np.where(
-        comparison['actual_revenue'] > 0,
-        (comparison['total_forecast_revenue'] - comparison['actual_revenue']) / comparison['actual_revenue'] * 100,
+        comparison['actual_won_revenue'] > 0,
+        (comparison['forecast_won_revenue'] - comparison['actual_won_revenue']) / comparison['actual_won_revenue'] * 100,
         0
     )
     
-    total_forecast = comparison['total_forecast_revenue'].sum()
+    total_forecast = comparison['forecast_won_revenue'].sum()
     total_actual = actual_closed['net_revenue'].sum()
     
     return {
         'comparison': comparison,
-        'active_forecast': active_forecast,
-        'future_forecast': future_in_period,
         'total_forecast': total_forecast,
         'total_actual': total_actual,
         'overall_variance_pct': ((total_forecast - total_actual) / total_actual * 100) if total_actual > 0 else 0
@@ -397,50 +409,42 @@ def export_results(monthly_forecast, assumptions, config, backtest_results=None)
 # MAIN
 # =============================================================================
 
-def run_forecast(
-    config=None,
-    scenario='base',
-    backtest=False,
-    backtest_date='2025-01-01',
-    actuals_through='2025-12-31',
-    generate_mock=False
-):
-    config = config or CONFIG.copy()
+def run_forecast():
+    print("Starting forecast pipeline...")
     
-    if isinstance(scenario, str):
-        scenario = SCENARIOS.get(scenario, SCENARIOS['base'])
+    scenario = SCENARIOS.get(SCENARIO, SCENARIOS['base']) if isinstance(SCENARIO, str) else SCENARIO
     
-    if generate_mock:
-        print("Running mock data generator...")
+    if GENERATE_MOCK:
+        print("Generating mock data...")
         from generate_mock import generate_mock_data
-        generate_mock_data(output_path=config['data_path'])
+        generate_mock_data(output_path=CONFIG['data_path'])
     
     print("Loading data...")
-    df = load_and_preprocess(config)
+    df = load_and_preprocess(CONFIG)
     
     print("Identifying deal outcomes...")
-    deal_summary = identify_deal_outcomes(df, config)
+    deal_summary = identify_deal_outcomes(df, CONFIG)
     
-    print("Calculating vintage curves...")
-    vintage_curves = calculate_vintage_curves(deal_summary, config)
+    print("Calculating vintage curves (Layer 1)...")
+    vintage_curves = calculate_vintage_curves(deal_summary, CONFIG)
     
-    print("Calculating stage probabilities...")
-    stage_probs = calculate_stage_probabilities(deal_summary, config)
-    staleness_thresholds = calculate_staleness_thresholds(df, config)
+    print("Calculating stage probabilities (Layer 2)...")
+    stage_probs = calculate_stage_probabilities(deal_summary, CONFIG)
+    staleness_thresholds = calculate_staleness_thresholds(df, CONFIG)
     
     print("Forecasting active pipeline...")
-    active_forecast = forecast_active_pipeline(df, deal_summary, stage_probs, staleness_thresholds, config['training_end'], config, scenario)
+    active_forecast = forecast_active_pipeline(df, deal_summary, stage_probs, staleness_thresholds, CONFIG['training_end'], CONFIG, scenario)
     
     print("Projecting future pipeline...")
-    historical_patterns = calculate_historical_deal_patterns(deal_summary, config)
-    future_pipeline = generate_future_pipeline(historical_patterns, config, scenario)
-    closure_projections = project_closure_timing(future_pipeline, vintage_curves, config)
+    historical_patterns = calculate_historical_deal_patterns(deal_summary, CONFIG)
+    future_pipeline = generate_future_pipeline(historical_patterns, CONFIG, scenario)
+    closure_projections = project_closure_timing(future_pipeline, vintage_curves, CONFIG)
     
     print("Aggregating forecasts...")
-    monthly_forecast = aggregate_forecasts(active_forecast, closure_projections, config)
+    monthly_forecast = aggregate_forecasts(active_forecast, closure_projections, CONFIG)
     
     assumptions = {
-        'config': {k: str(v) if isinstance(v, (datetime, pd.Timestamp)) else v for k, v in config.items()},
+        'config': {k: str(v) if isinstance(v, (datetime, pd.Timestamp)) else v for k, v in CONFIG.items()},
         'scenario': scenario,
         'historical_patterns': historical_patterns,
         'stage_probabilities': stage_probs,
@@ -449,18 +453,20 @@ def run_forecast(
     }
     
     backtest_results = None
-    if backtest:
-        print("Running backtest...")
-        backtest_results = run_backtest(df, deal_summary, config, scenario, backtest_date, actuals_through)
+    if RUN_BACKTEST:
+        print("Running backtest validation...")
+        backtest_results = run_backtest(df, deal_summary, CONFIG, scenario, BACKTEST_DATE, ACTUALS_THROUGH)
     
     print("Exporting results...")
-    export_results(monthly_forecast, assumptions, config, backtest_results)
+    export_results(monthly_forecast, assumptions, CONFIG, backtest_results)
     
-    annual_total = monthly_forecast['total_expected_revenue'].sum()
+    annual_total = monthly_forecast['expected_won_revenue'].sum()
     print(f"2026 Annual Forecast: ${annual_total:,.0f}")
     
     if backtest_results:
         print(f"Backtest Variance: {backtest_results['overall_variance_pct']:+.1f}%")
+    
+    print("Complete.")
     
     return {
         'monthly_forecast': monthly_forecast,
@@ -470,4 +476,4 @@ def run_forecast(
 
 
 if __name__ == "__main__":
-    run_forecast(generate_mock=True, backtest=True)
+    run_forecast()
