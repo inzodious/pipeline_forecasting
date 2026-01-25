@@ -10,8 +10,8 @@ def generate_mock_data(output_path='data/fact_snapshots.csv', seed=42):
     
     segments = {
         'Large Market': {
-            'deals_per_month': 6,
-            'avg_revenue': 180000,
+            'deals_per_month': 2,
+            'avg_revenue': 1000,
             'revenue_std': 60000,
             'win_rate': 0.32,
             'avg_days': 140,
@@ -19,8 +19,8 @@ def generate_mock_data(output_path='data/fact_snapshots.csv', seed=42):
             'qualified_entry_rate': 0.70,
         },
         'Mid Market/SMB': {
-            'deals_per_month': 20,
-            'avg_revenue': 40000,
+            'deals_per_month': 5,
+            'avg_revenue': 100,
             'revenue_std': 18000,
             'win_rate': 0.42,
             'avg_days': 65,
@@ -28,8 +28,8 @@ def generate_mock_data(output_path='data/fact_snapshots.csv', seed=42):
             'qualified_entry_rate': 0.68,
         },
         'Indirect': {
-            'deals_per_month': 22,
-            'avg_revenue': 55000,
+            'deals_per_month': 10,
+            'avg_revenue': 250,
             'revenue_std': 35000,
             'win_rate': 0.48,
             'avg_days': 50,

@@ -10,9 +10,9 @@ warnings.filterwarnings('ignore')
 # PIPELINE PARAMETERS (Fabric pipeline will override these)
 # =============================================================================
 
-GENERATE_MOCK = True
+GENERATE_MOCK = False
 RUN_BACKTEST = True
-SCENARIO = 'growth'
+SCENARIO = 'base'
 BACKTEST_DATE = '2025-01-01'
 ACTUALS_THROUGH = '2025-12-31'
 
@@ -271,6 +271,7 @@ def project_closure_timing(future_pipeline, vintage_curves, config):
                     'close_month': close_date.to_period('M'),
                     'weeks_to_close': week,
                     'closure_probability': incremental_prob,
+                    'expected_deals': incremental_prob * deal['win_probability'],
                     'projected_revenue': deal['projected_revenue'],
                     'expected_revenue': deal['projected_revenue'] * incremental_prob * deal['win_probability']
                 })
@@ -301,7 +302,7 @@ def aggregate_forecasts(active_pipeline_forecast, closure_projections, config):
                 'market_segment': segment,
                 'open_pipeline_deal_count': len(active_seg),
                 'open_pipeline_revenue': active_seg['net_revenue'].sum(),
-                'expected_won_deal_count': active_seg['adjusted_probability'].sum() + future_seg['closure_probability'].sum(),
+                'expected_won_deal_count': active_seg['adjusted_probability'].sum() + future_seg['expected_deals'].sum(),
                 'expected_won_revenue': active_seg['expected_revenue'].sum() + future_seg['expected_revenue'].sum(),
             })
     
@@ -353,7 +354,7 @@ def run_backtest(df, deal_summary, config, scenario, backtest_date, actuals_thro
     active_by_segment.columns = ['market_segment', 'active_expected_deals', 'active_expected_revenue']
     
     future_by_segment = future_in_period.groupby('market_segment').agg({
-        'closure_probability': 'sum',
+        'expected_deals': 'sum',
         'expected_revenue': 'sum'
     }).reset_index()
     future_by_segment.columns = ['market_segment', 'future_expected_deals', 'future_expected_revenue']
