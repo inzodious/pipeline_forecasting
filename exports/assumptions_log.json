@@ -24,63 +24,63 @@
     "max_vintage_weeks": 52
   },
   "scenario": {
-    "win_rate_uplift": 1.0,
-    "deal_volume_growth": 1.0,
-    "revenue_per_deal_uplift": 1.0
+    "win_rate_uplift": 1.1,
+    "deal_volume_growth": 1.15,
+    "revenue_per_deal_uplift": 1.05
   },
   "historical_patterns": {
     "Large Market": {
-      "avg_monthly_deals": 7.791666666666667,
-      "avg_deal_revenue": 150653.76276595745,
-      "win_rate": 0.29936305732484075,
-      "monthly_volatility": 2.918891490999945
+      "avg_monthly_deals": 5.541666666666667,
+      "avg_deal_revenue": 177231.63083333333,
+      "win_rate": 0.39669421487603307,
+      "monthly_volatility": 1.899179838238342
     },
     "Mid Market/SMB": {
-      "avg_monthly_deals": 22.979166666666668,
-      "avg_deal_revenue": 34250.33346733668,
-      "win_rate": 0.35535714285714287,
-      "monthly_volatility": 4.939809815619702
+      "avg_monthly_deals": 18.145833333333332,
+      "avg_deal_revenue": 39259.883169398905,
+      "win_rate": 0.4066666666666667,
+      "monthly_volatility": 3.6009635385264738
     },
     "Indirect": {
-      "avg_monthly_deals": 14.854166666666666,
-      "avg_deal_revenue": 21068.97467948718,
-      "win_rate": 0.4469914040114613,
-      "monthly_volatility": 4.66597109205405
+      "avg_monthly_deals": 19.9375,
+      "avg_deal_revenue": 58200.48857142858,
+      "win_rate": 0.4798387096774194,
+      "monthly_volatility": 4.8146346197545595
     }
   },
   "stage_probabilities": {
     "Large Market": {
-      "Qualified": 0.34814814814814815,
-      "Alignment": 0.44554455445544555,
-      "Solutioning": 0.5178571428571429
+      "Qualified": 0.39080459770114945,
+      "Alignment": 0.4142857142857143,
+      "Solutioning": 0.5454545454545454
     },
     "Mid Market/SMB": {
-      "Qualified": 0.4261241970021413,
-      "Alignment": 0.5271084337349398,
-      "Solutioning": 0.6685714285714286
+      "Qualified": 0.4230769230769231,
+      "Alignment": 0.48826291079812206,
+      "Solutioning": 0.6601941747572816
     },
     "Indirect": {
-      "Qualified": 0.5306122448979592,
-      "Alignment": 0.6422018348623854,
-      "Solutioning": 0.7266187050359713
+      "Qualified": 0.4937106918238994,
+      "Alignment": 0.5949367088607594,
+      "Solutioning": 0.6811594202898551
     }
   },
   "staleness_thresholds": {
     "Indirect": {
       "Qualified": 49.0,
-      "Alignment": 28.0,
-      "Solutioning": 35.0
+      "Alignment": 35.0,
+      "Solutioning": 35.70000000000006
     },
     "Large Market": {
-      "Qualified": 105.0,
-      "Alignment": 126.0,
-      "Solutioning": 142.79999999999998
+      "Qualified": 106.40000000000002,
+      "Alignment": 153.30000000000004,
+      "Solutioning": 175.0
     },
     "Mid Market/SMB": {
-      "Qualified": 70.0,
-      "Alignment": 56.0,
+      "Qualified": 77.0,
+      "Alignment": 63.0,
       "Solutioning": 56.0
     }
   },
-  "generated_at": "2026-01-25T13:29:12.591643"
+  "generated_at": "2026-01-25T13:43:32.367215"
 }

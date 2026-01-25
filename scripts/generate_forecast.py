@@ -10,9 +10,9 @@ warnings.filterwarnings('ignore')
 # PIPELINE PARAMETERS (Fabric pipeline will override these)
 # =============================================================================
 
-GENERATE_MOCK = False
-RUN_BACKTEST = False
-SCENARIO = 'base'
+GENERATE_MOCK = True
+RUN_BACKTEST = True
+SCENARIO = 'growth'
 BACKTEST_DATE = '2025-01-01'
 ACTUALS_THROUGH = '2025-12-31'
 
