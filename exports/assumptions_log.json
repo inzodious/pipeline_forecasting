@@ -1,0 +1,86 @@
+{
+  "config": {
+    "data_path": "data/fact_snapshots.csv",
+    "forecast_export_path": "exports/",
+    "validation_export_path": "validation/",
+    "training_start": "2024-01-01",
+    "training_end": "2025-12-31",
+    "forecast_year": 2026,
+    "skipper_weight": 0.5,
+    "staleness_percentile": 90,
+    "staleness_penalty": 0.8,
+    "stages_ordered": [
+      "Qualified",
+      "Alignment",
+      "Solutioning",
+      "Closed Won",
+      "Closed Lost"
+    ],
+    "active_stages": [
+      "Qualified",
+      "Alignment",
+      "Solutioning"
+    ],
+    "max_vintage_weeks": 52
+  },
+  "scenario": {
+    "win_rate_uplift": 1.0,
+    "deal_volume_growth": 1.0,
+    "revenue_per_deal_uplift": 1.0
+  },
+  "historical_patterns": {
+    "Large Market": {
+      "avg_monthly_deals": 7.791666666666667,
+      "avg_deal_revenue": 150653.76276595745,
+      "win_rate": 0.29936305732484075,
+      "monthly_volatility": 2.918891490999945
+    },
+    "Mid Market/SMB": {
+      "avg_monthly_deals": 22.979166666666668,
+      "avg_deal_revenue": 34250.33346733668,
+      "win_rate": 0.35535714285714287,
+      "monthly_volatility": 4.939809815619702
+    },
+    "Indirect": {
+      "avg_monthly_deals": 14.854166666666666,
+      "avg_deal_revenue": 21068.97467948718,
+      "win_rate": 0.4469914040114613,
+      "monthly_volatility": 4.66597109205405
+    }
+  },
+  "stage_probabilities": {
+    "Large Market": {
+      "Qualified": 0.34814814814814815,
+      "Alignment": 0.44554455445544555,
+      "Solutioning": 0.5178571428571429
+    },
+    "Mid Market/SMB": {
+      "Qualified": 0.4261241970021413,
+      "Alignment": 0.5271084337349398,
+      "Solutioning": 0.6685714285714286
+    },
+    "Indirect": {
+      "Qualified": 0.5306122448979592,
+      "Alignment": 0.6422018348623854,
+      "Solutioning": 0.7266187050359713
+    }
+  },
+  "staleness_thresholds": {
+    "Indirect": {
+      "Qualified": 49.0,
+      "Alignment": 28.0,
+      "Solutioning": 35.0
+    },
+    "Large Market": {
+      "Qualified": 105.0,
+      "Alignment": 126.0,
+      "Solutioning": 142.79999999999998
+    },
+    "Mid Market/SMB": {
+      "Qualified": 70.0,
+      "Alignment": 56.0,
+      "Solutioning": 56.0
+    }
+  },
+  "generated_at": "2026-01-25T13:29:12.591643"
+}
