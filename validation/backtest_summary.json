@@ -1,26 +1,28 @@
 {
-  "total_forecast": 1099221.9430738841,
-  "total_actual": 1324999.8199999998,
-  "overall_variance_pct": -17.03984208285521,
+  "total_forecast": 4967071.703861639,
+  "total_actual": 11434475.0192,
+  "overall_variance_pct": -56.56056184895881,
   "calibrated_scenario": {
-    "win_rate_uplift": 0.868421052631579,
-    "deal_volume_growth": 1.0725274725274725,
-    "revenue_per_deal_uplift": 0.932867714567626
+    "win_rate_uplift": 1.020429276561799,
+    "deal_volume_growth": 0.8155130383961735,
+    "revenue_per_deal_uplift": 0.4818606265411772
   },
   "diagnostics": {
-    "training_deals_total": 195,
-    "training_closed_won": 83,
-    "active_pipeline_count": 19,
-    "active_pipeline_expected": 102527.83317921068,
-    "future_pipeline_synthetic_deals": 192,
+    "training_deals_total": 3236,
+    "training_closed_won": 721,
+    "active_pipeline_count": 311,
+    "active_pipeline_expected": 3491471.3927024915,
+    "future_pipeline_synthetic_deals": 1464,
     "valid_segments": [
+      "Mid Market",
       "Large Market",
-      "Mid Market/SMB",
-      "Indirect"
+      "Indirect",
+      "SMB",
+      "Other"
     ],
-    "actual_carryover_deals": 12,
-    "actual_carryover_revenue": 178357.02000000002,
-    "actual_new_deals": 77,
-    "actual_new_revenue": 1146642.8
+    "actual_carryover_deals": 48,
+    "actual_carryover_revenue": 4246270.348,
+    "actual_new_deals": 522,
+    "actual_new_revenue": 7188204.6712
   }
 }
