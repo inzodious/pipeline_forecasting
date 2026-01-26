@@ -1,0 +1,46 @@
+{
+  "total_forecast": 1726067.8034285717,
+  "total_actual": 1324999.82,
+  "variance_pct": 30.269285880248013,
+  "stage_conversion_rates": {
+    "_GLOBAL": {
+      "Qualified": 0.4700854700854701,
+      "Alignment": 0.5595238095238095,
+      "Solutioning": 0.7083333333333334
+    },
+    "Large Market": {
+      "Qualified": 0.4166666666666667,
+      "Alignment": 0.5595238095238095,
+      "Solutioning": 0.7083333333333334
+    },
+    "Mid Market/SMB": {
+      "Qualified": 0.42857142857142855,
+      "Alignment": 0.4642857142857143,
+      "Solutioning": 0.625
+    },
+    "Indirect": {
+      "Qualified": 0.5,
+      "Alignment": 0.62,
+      "Solutioning": 0.7666666666666667
+    }
+  },
+  "historical_baseline": {
+    "_GLOBAL": {
+      "avg_monthly_deals": 6.916666666666667,
+      "avg_monthly_revenue": 111511.49333333333
+    },
+    "Indirect": {
+      "avg_monthly_deals": 4.25,
+      "avg_monthly_revenue": 76770.55583333333
+    },
+    "Large Market": {
+      "avg_monthly_deals": 1.1666666666666667,
+      "avg_monthly_revenue": 26449.600000000002
+    },
+    "Mid Market/SMB": {
+      "avg_monthly_deals": 2.7777777777777777,
+      "avg_monthly_revenue": 28688.183333333334
+    }
+  },
+  "generated_at": "2026-01-25T18:38:17.607345"
+}
