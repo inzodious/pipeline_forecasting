@@ -1,196 +1,245 @@
-# Pipeline Revenue Forecasting Model V2
-## Technical Methodology & Validation
+# Pipeline Revenue Forecasting Model V3
+## Implementation Year Based Forecasting
 
 ---
 
-## Executive Summary
+## The Fundamental Change
 
-This model forecasts pipeline revenue using a **two-component approach**:
-1. **Active Pipeline Conversion** - Stage-based probability model for existing deals
-2. **Future Pipeline Projection** - Historical closure baseline with conservatism adjustment
+**V2 asked:** "How much revenue will close in 2025?"
+**V3 asks:** "How much revenue will we win with 2025 implementation dates?"
 
-**Backtest Performance**: +1.7% variance (within ±10% target)
+This distinction matters because:
+- A deal closing in December 2024 might have January 2025 implementation
+- A deal closing in November 2025 might have January 2026 implementation
+- Management reports typically focus on implementation year, not close date
 
 ---
 
-## Model Components
+## Model Architecture
 
-### Component 1: Active Pipeline Valuation
-
-**Methodology**: Stage-Weighted Conversion
-
-For each deal currently in an active stage, calculate:
-```
-Expected Value = Deal Value × Stage Conversion Rate
-```
-
-**Stage Conversion Rates** (derived from historical closed deals):
-| Stage | Conversion Rate | Interpretation |
-|-------|-----------------|----------------|
-| Qualified | 47% | P(Won \| deal passed through Qualified) |
-| Alignment | 56% | P(Won \| deal passed through Alignment) |
-| Solutioning | 71% | P(Won \| deal passed through Solutioning) |
-
-**Why This Works**:
-- Based on observed historical outcomes
-- Later stages have higher rates (deals that progress are more likely to win)
-- Segment-specific rates used when sufficient data (>10 deals), global fallback otherwise
-
-### Component 2: Future Pipeline Projection
-
-**Methodology**: Trailing 12-Month Closure Baseline × Conservatism Factor
+### Component 1: Active Pipeline (Implementation Year Filtered)
 
 ```
-Monthly Expected = Historical Monthly Avg × Conservatism Factor
-Annual Projection = Monthly Expected × 12
+Active Pipeline for 2025 = Deals where:
+  - Stage ∈ {Qualified, Alignment, Solutioning, Verbal}
+  - implementation_year = 2025
 ```
 
-**Key Parameters**:
-| Parameter | Value | Justification |
-|-----------|-------|---------------|
-| Trailing Period | 12 months | Full annual cycle captures seasonality |
-| Conservatism Factor | 90% | 10% haircut accounts for YoY variance |
+**Why this matters:** In V2, we included ALL active deals regardless of implementation year. This caused over-forecasting because deals with 2026 implementation dates were counted toward 2025.
 
-**Why 90% Conservatism?**
+### Component 2: Stage Conversion Rates
 
-Historical analysis shows year-over-year variance of 10-15% is typical:
-- 2024 new deal closures: $1,338,138
-- 2025 new deal closures: $1,146,643
-- Actual YoY ratio: 0.86 (-14%)
+```
+P(Win | Stage) = Historical win rate for deals that:
+  - Passed through that stage
+  - Have implementation_year < target_year (to avoid data leakage)
+```
 
-Using 90% (slightly optimistic) rather than exact historical variance because:
-1. We don't know future direction of variance
-2. Provides reasonable middle ground between over/under-forecast
-3. Results in aggregate variance well within ±10%
+**Why filter by impl_year:** Deals with future implementation years may have different characteristics. We only train on "completed" cohorts.
 
-**Sensitivity Analysis**:
-| Conservatism | Forecast | Variance |
-|--------------|----------|----------|
-| 1.00 (none) | $1,478k | +11.6% |
-| 0.95 | $1,412k | +6.5% |
-| **0.90** | **$1,347k** | **+1.7%** |
-| 0.85 | $1,278k | -3.6% |
-| 0.80 | $1,211k | -8.6% |
+### Component 3: Future Pipeline Projection
+
+```
+Future Revenue = Prior Year Impl Revenue × Conservatism × Growth
+```
+
+**Logic:** If we won $10M of 2024 implementation year deals, we might expect to win approximately $10M × 0.85 = $8.5M of 2025 implementation year deals from pipeline not yet created.
 
 ---
 
-## Why This Model Works (vs. V1)
+## Why V2 Failed (79% Variance)
 
-### Problem with V1: Over-Engineering
+### Problem 1: Wrong Pipeline Filter
 
-The original model used:
-- Vintage curves (unnecessary complexity)
-- Stage staleness penalties (added noise, not signal)
-- Synthetic deal generation (introduced bias)
-- Segment-specific monthly averages (thin segment amplification)
+V2 included **all active deals** regardless of implementation year:
 
-### V2 Simplifications
+| Segment | Active Deals | Active Value | Actual Won |
+|---------|--------------|--------------|------------|
+| Large Market | 38 | $17.7M | $2.9M |
 
-| V1 Approach | V2 Approach | Impact |
-|-------------|-------------|--------|
-| Vintage curves for timing | Not used - timing unnecessary for aggregate forecast | Removed source of error |
-| Staleness penalties | Not used - no evidence these improve accuracy | Removed arbitrary parameter |
-| Segment monthly averages | Global total distributed by share | Eliminated thin segment amplification |
-| 100% baseline projection | 90% conservatism | Accounts for YoY variance |
+Many of those 38 deals had **2026 implementation years** and shouldn't have been in the 2025 forecast.
 
----
+### Problem 2: Wrong Training Data
 
-## Validation Results
+V2 calculated conversion rates from all historical deals. But Large Market deals with 2024 implementation may have different win rates than Large Market deals with 2025 implementation.
 
-### Aggregate Performance
-| Metric | Value |
-|--------|-------|
-| Forecast | $1,347,492 |
-| Actual | $1,325,000 |
-| Variance | **+1.7%** |
-| Target | ±10% |
-| Status | ✓ PASS |
+### Problem 3: Insufficient Conservatism
 
-### Segment Performance
-| Segment | Forecast | Actual | Variance |
-|---------|----------|--------|----------|
-| Indirect | $918k | $868k | +5.8% |
-| Large Market | $155k | $135k | +14.6% |
-| Mid Market/SMB | $274k | $322k | -14.8% |
-
-**Note**: Segment-level variance is higher due to small sample sizes. Large Market had only 5 deals in 2025, making individual deal outcomes highly impactful.
-
-### Component Breakdown
-| Component | Forecast | Actual | Accuracy |
-|-----------|----------|--------|----------|
-| Active Pipeline (Carryover) | $143k | $178k | 80% |
-| Future Pipeline (New Deals) | $1,204k | $1,147k | 95% |
+V2 used 90% conservatism, but the actual YoY variance was larger.
 
 ---
 
-## Assumptions & Limitations
+## Running the Diagnostics
 
-### Assumptions
-1. **Historical patterns persist** - Future resembles trailing 12 months
-2. **Stage conversion rates are stable** - Past conversion predicts future conversion
-3. **Segment mix remains similar** - Revenue distribution by segment stays consistent
+Before running the forecast model, run `diagnostics.py` to understand your data:
 
-### Limitations
-1. **Small segment variance** - Segments with <10 deals/year have high forecast uncertainty
-2. **No seasonality modeling** - Model uses annual average, not monthly patterns
-3. **No deal-level features** - Model doesn't consider deal size, customer type, rep, etc.
-4. **Point estimate only** - No confidence intervals (could add with bootstrap)
+```bash
+python scripts/diagnostics.py data/fact_snapshots.csv
+```
 
-### When This Model May Fail
-- Major market disruption (M&A, economic shock)
-- Significant changes in sales strategy or territory
-- New product launches that change deal dynamics
-- Large one-time deals that skew historical baseline
+This will show:
+1. Implementation year distribution
+2. Active pipeline by implementation year
+3. Actual conversion rates by segment
+4. Historical stage conversion rates
+5. Recommended conservatism factor
 
 ---
 
-## Implementation Notes
+## Key Diagnostic Questions
 
-### Required Data
-- Weekly CRM snapshots with: `deal_id`, `date_created`, `date_closed`, `stage`, `net_revenue`, `market_segment`
+### Q1: What's in the active pipeline by implementation year?
 
-### Key Functions
+```
+Active Pipeline at 2025-01-01 by Implementation Year:
+  2024: 50 deals, $3M    → These should NOT be in 2025 forecast
+  2025: 100 deals, $8M   → These ARE the 2025 forecast
+  2026: 30 deals, $5M    → These should NOT be in 2025 forecast
+```
+
+### Q2: What happened to the 2025 impl_year active pipeline?
+
+```
+2025 Impl Year Active Pipeline Outcomes:
+  Won: 40 deals, $4M
+  Lost: 45 deals, $3M
+  Still Open: 15 deals, $1M  → These may slip to 2026 impl
+```
+
+### Q3: What's the actual conversion rate by segment?
+
+```
+Large Market (impl_year=2025):
+  Active: 20 deals, $10M
+  Won: 4 deals, $2M
+  Deal Conversion: 20%
+  Value Conversion: 20%
+```
+
+---
+
+## Model Calibration
+
+### Setting Conservatism Factor
+
+1. Run diagnostics to get YoY impl year revenue:
+   - 2024 impl year won: $X
+   - 2025 impl year won: $Y
+   - Ratio: Y/X
+
+2. Use ratio as starting point for conservatism:
+   - If ratio = 0.85, consider conservatism = 0.80-0.90
+   - If ratio = 1.10, consider conservatism = 0.95-1.00
+
+### Setting Conversion Rates
+
+The model calculates rates automatically from historical data. But verify they make sense:
+
+| Stage | Expected Range | If Outside Range |
+|-------|----------------|------------------|
+| Qualified | 15-25% | Check data quality |
+| Alignment | 30-50% | Check stage definitions |
+| Solutioning | 50-70% | Check stage definitions |
+| Verbal | 70-90% | Check stage definitions |
+
+---
+
+## Validation Process
+
+### Step 1: Run Diagnostics
+
+```bash
+python scripts/diagnostics.py
+```
+
+### Step 2: Review Pipeline by Implementation Year
+
+Ensure the implementation year filter makes sense. If most deals have null implementation dates, the model won't work.
+
+### Step 3: Run Backtest
+
+```bash
+python scripts/forecast_model_v3.py
+```
+
+### Step 4: Analyze Variance by Component
+
+```
+Forecast = Active Expected + Future Expected
+Actual = From Active + From Future
+
+Check:
+- Active Expected vs From Active (pipeline accuracy)
+- Future Expected vs From Future (baseline accuracy)
+```
+
+### Step 5: Segment Deep-Dive
+
+If a segment has high variance:
+1. Check sample size (thin segments have high variance)
+2. Check if conversion rates match observed rates
+3. Check if baseline year is representative
+
+---
+
+## Expected Accuracy
+
+| Metric | Target | V2 Result | V3 Target |
+|--------|--------|-----------|-----------|
+| Aggregate Variance | ±10% | +79% | ±10% |
+| Large Market | ±20% | +203% | ±20% |
+| Mid Market | ±15% | +19% | ±15% |
+
+**Note:** Large Market will always have higher variance due to:
+- Fewer deals (small sample)
+- Larger deal sizes (single deal can swing results)
+- Longer sales cycles (more uncertainty)
+
+---
+
+## Dual Forecasting (Optional)
+
+If management wants BOTH close date and implementation year forecasts:
+
 ```python
-# Stage conversion rates
-calculate_stage_conversion_rates(deal_summary, config)
+# Forecast 1: Implementation Year 2026
+results_impl = run_backtest(df, config, scenario, '2026-01-01', target_impl_year=2026)
 
-# Historical baseline
-calculate_historical_closure_baseline(deal_summary, training_end_date, config)
-
-# Active pipeline forecast
-forecast_active_pipeline(active_pipeline, stage_rates, config, scenario)
-
-# Future pipeline forecast  
-forecast_future_pipeline(baseline, forecast_months, config, scenario)
-```
-
-### Configuration Parameters
-```python
-CONFIG = {
-    'trailing_months': 12,           # Historical lookback
-    'future_conservatism': 0.90,     # Haircut on future projection
-    'min_deals_for_segment': 10,     # Minimum for segment-specific rates
-    'default_conversion_rate': 0.35, # Fallback when insufficient data
-}
+# Forecast 2: Close Date 2026 
+# (requires modifying the model to filter by expected close date instead)
 ```
 
 ---
 
-## Recommendations for Production
+## Troubleshooting
 
-1. **Monitor Monthly**: Compare actual closures to forecast, track cumulative variance
-2. **Recalibrate Quarterly**: Update conservatism factor based on recent variance
-3. **Segment Reporting**: Report aggregate with high confidence, segment with caveats
-4. **Scenario Sensitivity**: Present base, growth (+15%), conservative (-10%) scenarios
+### "Too few deals in active pipeline"
+
+The implementation year filter may be too restrictive. Check:
+- Are implementation dates populated?
+- Are deals being assigned the correct implementation year?
+
+### "Conversion rates are 0% or 100%"
+
+Not enough training data. Consider:
+- Using global rates instead of segment-specific
+- Increasing the training window
+- Combining similar segments
+
+### "Still seeing high variance"
+
+Check if "Still Open" deals are significant. If many 2025 impl year deals are still open, they may:
+- Slip to 2026 implementation
+- Eventually close won (meaning your forecast was right, just early)
 
 ---
 
-## Appendix: Model Comparison
+## Summary
 
-| Metric | V1 Model | V2 Model |
-|--------|----------|----------|
-| Variance | -57% | +1.7% |
-| Complexity | High | Low |
-| Parameters | 8+ | 4 |
-| Auditability | Difficult | Excel-verifiable |
-| Run Time | ~5 sec | ~2 sec |
+V3's key insight: **Filter everything by implementation year**.
+
+1. Active pipeline → Only deals with target impl year
+2. Conversion rates → Only train on prior impl year cohorts
+3. Future baseline → Use prior impl year total as baseline
+
+This aligns the forecast with how management measures results.

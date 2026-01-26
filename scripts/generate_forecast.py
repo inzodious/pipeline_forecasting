@@ -1,20 +1,21 @@
 """
-Pipeline Revenue Forecasting Model V2
+Pipeline Revenue Forecasting Model V3
 =====================================
 
-A two-component model for forecasting pipeline revenue:
-1. Active Pipeline Conversion: Stage-based probability model
-2. Future Pipeline Projection: Historical closure baseline with conservatism adjustment
+FUNDAMENTAL CHANGE: Forecasts by IMPLEMENTATION YEAR, not close date.
 
-Methodology Summary:
-- Uses historical stage conversion rates to value active pipeline
-- Projects future closures based on trailing 12-month closure patterns
-- Applies a conservatism factor (default 10%) to future projections
-- Validates via backtesting against historical actuals
+When management asks "What's our 2025 forecast?", they mean:
+"How much revenue will we win that has a 2025 implementation date?"
 
-Target Accuracy: ±10% variance on aggregate forecasts
+This is different from "How much will close in 2025?" because:
+- A deal closing in Dec 2024 might have Jan 2025 implementation
+- A deal closing in Nov 2025 might have Jan 2026 implementation
 
-Author: Generated for EAP Revenue Forecasting
+Model Components:
+1. Active Pipeline: Deals in active stages with target implementation year
+2. Future Pipeline: Projected new deals that will have target implementation year
+
+Author: Pipeline Forecasting System
 """
 
 import pandas as pd
@@ -26,36 +27,27 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # =============================================================================
-# PARAMETERS (Override these in Fabric pipeline)
-# =============================================================================
-
-GENERATE_MOCK = False
-RUN_BACKTEST = True
-SCENARIO = 'base'
-BACKTEST_DATE = '2025-01-01'
-ACTUALS_THROUGH = '2025-12-31'
-
-# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
 CONFIG = {
     'data_path': 'data/fact_snapshots.csv',
-    'forecast_export_path': 'exports/',
     'validation_export_path': 'validation/',
-    'forecast_year': 2026,
     
-    'active_stages': ['Qualified', 'Alignment', 'Solutioning'],
+    # Active stages (deals we can still win)
+    'active_stages': ['Qualified', 'Alignment', 'Solutioning', 'Verbal'],
+    
+    # Minimum deals needed for segment-specific rates
     'min_deals_for_segment': 10,
+    
+    # Historical lookback for baseline calculation
     'trailing_months': 12,
     
-    # Conservatism factor: Applied to future pipeline projections
-    # Rationale: Historical YoY variance typically 10-15% 
-    # 0.90 = 10% haircut on baseline projection
-    'future_conservatism': 0.90,
+    # Conservatism factor for future pipeline (accounts for YoY variance)
+    'future_conservatism': 0.85,
     
-    # Fallback conversion rate if insufficient historical data
-    'default_conversion_rate': 0.35,
+    # Default conversion rate when insufficient data
+    'default_conversion_rate': 0.25,
 }
 
 SCENARIOS = {
@@ -63,19 +55,16 @@ SCENARIOS = {
         'volume_growth': 1.0, 
         'win_rate_adjustment': 1.0, 
         'deal_size_adjustment': 1.0,
-        'description': 'Baseline forecast using historical patterns'
     },
     'growth': {
         'volume_growth': 1.15, 
         'win_rate_adjustment': 1.05, 
-        'deal_size_adjustment': 1.05,
-        'description': '15% volume growth, 5% win rate improvement'
+        'deal_size_adjustment': 1.0,
     },
     'conservative': {
-        'volume_growth': 0.90, 
-        'win_rate_adjustment': 0.95, 
+        'volume_growth': 0.85, 
+        'win_rate_adjustment': 0.90, 
         'deal_size_adjustment': 1.0,
-        'description': '10% volume decline, 5% win rate decline'
     },
 }
 
@@ -84,140 +73,161 @@ SCENARIOS = {
 # =============================================================================
 
 def load_data(config):
-    """Load and validate snapshot data."""
-    df = pd.read_csv(config['data_path'], parse_dates=['date_created', 'date_closed', 'date_snapshot'])
+    """Load and parse snapshot data."""
+    df = pd.read_csv(
+        config['data_path'], 
+        parse_dates=['date_snapshot', 'date_created', 'date_closed', 'date_implementation']
+    )
+    
     df['market_segment'] = df['market_segment'].fillna('Unknown')
     df['net_revenue'] = pd.to_numeric(df['net_revenue'], errors='coerce').fillna(0)
+    df['impl_year'] = df['date_implementation'].dt.year
+    
     return df
 
 
-def build_deal_summary(df, as_of_date=None):
+def get_latest_state(df, as_of_date=None):
     """
-    Build deal-level summary with outcomes.
-    
-    If as_of_date provided, only uses snapshots up to that date (prevents data leakage).
+    Get the latest state of each deal as of a given date.
+    This is the "point-in-time" view for backtesting.
     """
     if as_of_date:
         df = df[df['date_snapshot'] <= pd.to_datetime(as_of_date)].copy()
     
-    deal_summary = df.groupby('deal_id').agg({
-        'date_created': 'first',
-        'date_closed': 'first',
-        'net_revenue': 'last',
-        'market_segment': 'first',
-        'stage': lambda x: list(x.unique())
-    }).reset_index()
-    deal_summary.columns = ['deal_id', 'date_created', 'date_closed', 'net_revenue', 
-                           'market_segment', 'stages_observed']
+    latest = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
+    return latest
+
+
+def get_deal_outcomes(df):
+    """
+    Get final outcome for each deal (using all available data).
+    Used for calculating actual results in backtesting.
+    """
+    latest = df.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
     
-    def get_outcome(stages):
-        if 'Closed Won' in stages:
-            return 'Closed Won'
-        elif 'Closed Lost' in stages:
-            return 'Closed Lost'
+    def classify_outcome(stage):
+        if stage == 'Closed Won':
+            return 'Won'
+        elif stage == 'Closed Lost':
+            return 'Lost'
         return 'Open'
     
-    deal_summary['outcome'] = deal_summary['stages_observed'].apply(get_outcome)
-    return deal_summary
+    latest['outcome'] = latest['stage'].apply(classify_outcome)
+    return latest
 
 # =============================================================================
-# COMPONENT 1: STAGE CONVERSION RATES
+# STAGE CONVERSION RATES (BY IMPLEMENTATION YEAR)
 # =============================================================================
 
-def calculate_stage_conversion_rates(deal_summary, config):
+def calculate_stage_conversion_rates(df, as_of_date, target_impl_year, config):
     """
-    Calculate P(Won | deal passed through stage) for each stage.
+    Calculate P(Won | stage, implementation_year).
     
-    Uses closed deals only to avoid bias from open deals.
-    Returns segment-specific rates with global fallback.
+    CRITICAL: Only use deals with implementation years in the PAST
+    to avoid data leakage. We train on impl_year < target_impl_year.
     """
-    closed = deal_summary[deal_summary['outcome'].isin(['Closed Won', 'Closed Lost'])]
+    as_of = pd.to_datetime(as_of_date)
+    
+    # Get deals that closed BEFORE as_of_date with PAST implementation years
+    closed_deals = df[
+        (df['date_closed'].notna()) &
+        (df['date_closed'] <= as_of) &
+        (df['impl_year'] < target_impl_year)  # Only past implementation years
+    ].copy()
+    
+    # Get final state of these deals
+    final_state = closed_deals.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
+    final_state = final_state[final_state['stage'].isin(['Closed Won', 'Closed Lost'])]
+    
+    # Get ALL stages each deal passed through
+    deal_stages = closed_deals.groupby('deal_id')['stage'].apply(lambda x: set(x)).reset_index()
+    deal_stages.columns = ['deal_id', 'stages_passed']
+    
+    final_state = final_state.merge(deal_stages, on='deal_id', how='left')
+    final_state['is_won'] = final_state['stage'] == 'Closed Won'
     
     rates = {'_GLOBAL': {}}
     
+    # Calculate global rates
     for stage in config['active_stages']:
-        stage_deals = closed[closed['stages_observed'].apply(lambda x: stage in x)]
-        won = stage_deals[stage_deals['outcome'] == 'Closed Won']
-        rate = len(won) / len(stage_deals) if len(stage_deals) > 0 else config['default_conversion_rate']
+        through_stage = final_state[final_state['stages_passed'].apply(lambda x: stage in x if x else False)]
+        if len(through_stage) >= 5:
+            rate = through_stage['is_won'].mean()
+        else:
+            rate = config['default_conversion_rate']
         rates['_GLOBAL'][stage] = rate
     
-    for segment in deal_summary['market_segment'].unique():
-        seg_closed = closed[closed['market_segment'] == segment]
+    # Calculate segment-specific rates
+    for segment in final_state['market_segment'].unique():
+        seg_deals = final_state[final_state['market_segment'] == segment]
         rates[segment] = {}
         
         for stage in config['active_stages']:
-            stage_deals = seg_closed[seg_closed['stages_observed'].apply(lambda x: stage in x)]
+            through_stage = seg_deals[seg_deals['stages_passed'].apply(lambda x: stage in x if x else False)]
             
-            if len(stage_deals) < config['min_deals_for_segment']:
-                rates[segment][stage] = rates['_GLOBAL'][stage]
+            if len(through_stage) >= config['min_deals_for_segment']:
+                rates[segment][stage] = through_stage['is_won'].mean()
             else:
-                won = stage_deals[stage_deals['outcome'] == 'Closed Won']
-                rates[segment][stage] = len(won) / len(stage_deals)
+                rates[segment][stage] = rates['_GLOBAL'][stage]
     
     return rates
 
 # =============================================================================
-# COMPONENT 2: HISTORICAL CLOSURE BASELINE
+# HISTORICAL BASELINE (BY IMPLEMENTATION YEAR)
 # =============================================================================
 
-def calculate_historical_closure_baseline(deal_summary, training_end_date, config):
+def calculate_historical_baseline(df, as_of_date, target_impl_year, config):
     """
-    Calculate trailing N-month closure baseline for revenue projection.
+    Calculate historical closure patterns for deals with specific implementation years.
     
-    Key features:
-    - Uses global totals distributed by segment share (prevents thin segment amplification)
-    - Only counts deals created within trailing period (avoids double-counting carryover)
+    Key insight: For forecasting 2025 implementation year revenue, we look at
+    how much 2024 implementation year revenue was won, 2023 impl year, etc.
     """
-    training_end = pd.to_datetime(training_end_date)
-    trailing_start = training_end - pd.DateOffset(months=config['trailing_months'])
+    as_of = pd.to_datetime(as_of_date)
     
-    won = deal_summary[
-        (deal_summary['outcome'] == 'Closed Won') &
-        (deal_summary['date_closed'] >= trailing_start) &
-        (deal_summary['date_closed'] <= training_end) &
-        (deal_summary['date_created'] >= trailing_start)  # New deals only
+    # Get closed won deals before as_of_date
+    closed_won = df[
+        (df['stage'] == 'Closed Won') &
+        (df['date_closed'].notna()) &
+        (df['date_closed'] <= as_of)
     ].copy()
     
-    if len(won) == 0:
+    # Get unique deals (latest snapshot)
+    won_deals = closed_won.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
+    
+    # Look at the PREVIOUS implementation year for baseline
+    # If forecasting 2025, look at 2024 impl year deals
+    baseline_impl_year = target_impl_year - 1
+    
+    baseline_deals = won_deals[won_deals['impl_year'] == baseline_impl_year]
+    
+    if len(baseline_deals) == 0:
+        print(f"  WARNING: No closed deals found with impl_year={baseline_impl_year}")
         return None
     
-    won['close_month'] = won['date_closed'].dt.to_period('M')
-    n_months = max(won['close_month'].nunique(), 1)
+    total_revenue = baseline_deals['net_revenue'].sum()
+    total_deals = len(baseline_deals)
     
-    total_deals = len(won)
-    total_revenue = won['net_revenue'].sum()
-    
-    global_monthly_deals = total_deals / n_months
-    global_monthly_revenue = total_revenue / n_months
-    
-    segment_totals = won.groupby('market_segment').agg({
+    # Segment breakdown
+    segment_totals = baseline_deals.groupby('market_segment').agg({
         'deal_id': 'count',
         'net_revenue': 'sum'
     }).reset_index()
     segment_totals.columns = ['segment', 'deals', 'revenue']
-    
-    if total_deals > 0:
-        segment_totals['deal_share'] = segment_totals['deals'] / total_deals
-        segment_totals['revenue_share'] = segment_totals['revenue'] / total_revenue
-    else:
-        segment_totals['deal_share'] = 0
-        segment_totals['revenue_share'] = 0
+    segment_totals['revenue_share'] = segment_totals['revenue'] / total_revenue if total_revenue > 0 else 0
     
     baseline = {
         '_GLOBAL': {
-            'avg_monthly_deals': global_monthly_deals,
-            'avg_monthly_revenue': global_monthly_revenue,
+            'impl_year': baseline_impl_year,
             'total_deals': total_deals,
             'total_revenue': total_revenue,
-            'n_months': n_months,
         }
     }
     
     for _, row in segment_totals.iterrows():
         baseline[row['segment']] = {
-            'avg_monthly_deals': global_monthly_deals * row['deal_share'],
-            'avg_monthly_revenue': global_monthly_revenue * row['revenue_share'],
-            'deal_share': row['deal_share'],
+            'deals': row['deals'],
+            'revenue': row['revenue'],
             'revenue_share': row['revenue_share'],
         }
     
@@ -227,35 +237,25 @@ def calculate_historical_closure_baseline(deal_summary, training_end_date, confi
 # ACTIVE PIPELINE FORECAST
 # =============================================================================
 
-def get_active_pipeline(df, deal_summary, as_of_date, config):
-    """Get all deals in active stages as of given date."""
-    as_of = pd.to_datetime(as_of_date)
+def get_active_pipeline_for_impl_year(df, as_of_date, target_impl_year, config):
+    """
+    Get deals in active stages with the target implementation year.
     
-    snapshot_dates = df[df['date_snapshot'] <= as_of]['date_snapshot'].unique()
-    if len(snapshot_dates) == 0:
-        return pd.DataFrame()
+    This is the key filter: only count pipeline where impl_year matches target.
+    """
+    latest = get_latest_state(df, as_of_date)
     
-    latest_snapshot_date = max(snapshot_dates)
-    latest = df[df['date_snapshot'] == latest_snapshot_date].copy()
-    active = latest[latest['stage'].isin(config['active_stages'])].copy()
+    active = latest[
+        (latest['stage'].isin(config['active_stages'])) &
+        (latest['impl_year'] == target_impl_year)
+    ].copy()
     
-    closed_dates = deal_summary.set_index('deal_id')['date_closed'].to_dict()
-    
-    def is_actually_open(deal_id):
-        close_date = closed_dates.get(deal_id)
-        if pd.isna(close_date):
-            return True
-        return pd.to_datetime(close_date) > as_of
-    
-    active = active[active['deal_id'].apply(is_actually_open)]
     return active
 
 
 def forecast_active_pipeline(active_pipeline, stage_rates, config, scenario):
     """
     Calculate expected value of active pipeline.
-    
-    Expected Value = Sum(Deal Value × Stage Conversion Rate × Adjustments)
     """
     if active_pipeline.empty:
         return pd.DataFrame()
@@ -266,8 +266,9 @@ def forecast_active_pipeline(active_pipeline, stage_rates, config, scenario):
         stage = deal['stage']
         revenue = deal['net_revenue']
         
+        # Get conversion rate (segment-specific or global fallback)
         base_rate = stage_rates.get(segment, {}).get(stage)
-        if base_rate is None:
+        if base_rate is None or pd.isna(base_rate):
             base_rate = stage_rates['_GLOBAL'].get(stage, config['default_conversion_rate'])
         
         adjusted_rate = min(base_rate * scenario['win_rate_adjustment'], 1.0)
@@ -275,8 +276,10 @@ def forecast_active_pipeline(active_pipeline, stage_rates, config, scenario):
         
         results.append({
             'deal_id': deal['deal_id'],
+            'deal_name': deal.get('deal_name', ''),
             'market_segment': segment,
             'stage': stage,
+            'impl_year': deal['impl_year'],
             'net_revenue': revenue,
             'conversion_rate': base_rate,
             'adjusted_rate': adjusted_rate,
@@ -289,95 +292,37 @@ def forecast_active_pipeline(active_pipeline, stage_rates, config, scenario):
 # FUTURE PIPELINE FORECAST
 # =============================================================================
 
-def forecast_future_pipeline(baseline, forecast_months, config, scenario):
+def forecast_future_pipeline(baseline, config, scenario):
     """
-    Project future closures based on historical baseline.
+    Project future deals based on historical baseline.
     
-    Applies:
-    - Scenario volume/deal size adjustments
-    - Conservatism factor (default 10% haircut)
+    Logic: If we won $X of 2024 impl year deals, we expect to win 
+    approximately $X * conservatism * growth of 2025 impl year deals
+    from pipeline not yet created.
     """
     if baseline is None:
         return pd.DataFrame()
     
-    conservatism = config.get('future_conservatism', 1.0)
+    conservatism = config.get('future_conservatism', 0.85)
     
     results = []
-    for month in forecast_months:
-        for segment, metrics in baseline.items():
-            if segment == '_GLOBAL':
-                continue
-            
-            expected_deals = (metrics['avg_monthly_deals'] * 
-                           scenario['volume_growth'] * conservatism)
-            expected_revenue = (metrics['avg_monthly_revenue'] * 
-                              scenario['volume_growth'] * 
-                              scenario['deal_size_adjustment'] * conservatism)
-            
-            results.append({
-                'forecast_month': str(month),
-                'market_segment': segment,
-                'expected_deals': expected_deals,
-                'expected_revenue': expected_revenue,
-            })
-    
-    return pd.DataFrame(results)
-
-# =============================================================================
-# AGGREGATION & OUTPUT
-# =============================================================================
-
-def aggregate_forecast(active_forecast, future_forecast):
-    """Combine active and future forecasts by segment."""
-    results = []
-    
-    active_by_seg = pd.DataFrame()
-    if not active_forecast.empty:
-        active_by_seg = active_forecast.groupby('market_segment').agg({
-            'expected_revenue': 'sum',
-            'deal_id': 'count'
-        }).reset_index()
-        active_by_seg.columns = ['market_segment', 'active_expected_revenue', 'active_deal_count']
-    
-    future_by_seg = pd.DataFrame()
-    if not future_forecast.empty:
-        future_by_seg = future_forecast.groupby('market_segment').agg({
-            'expected_revenue': 'sum',
-            'expected_deals': 'sum'
-        }).reset_index()
-        future_by_seg.columns = ['market_segment', 'future_expected_revenue', 'future_expected_deals']
-    
-    all_segments = set()
-    if not active_by_seg.empty:
-        all_segments.update(active_by_seg['market_segment'].tolist())
-    if not future_by_seg.empty:
-        all_segments.update(future_by_seg['market_segment'].tolist())
-    
-    for segment in all_segments:
-        active_rev = 0
-        active_count = 0
-        future_rev = 0
-        future_deals = 0
+    for segment, metrics in baseline.items():
+        if segment == '_GLOBAL':
+            continue
         
-        if not active_by_seg.empty:
-            seg_data = active_by_seg[active_by_seg['market_segment'] == segment]
-            if len(seg_data) > 0:
-                active_rev = seg_data['active_expected_revenue'].iloc[0]
-                active_count = seg_data['active_deal_count'].iloc[0]
-        
-        if not future_by_seg.empty:
-            seg_data = future_by_seg[future_by_seg['market_segment'] == segment]
-            if len(seg_data) > 0:
-                future_rev = seg_data['future_expected_revenue'].iloc[0]
-                future_deals = seg_data['future_expected_deals'].iloc[0]
+        # Project based on prior year, adjusted for scenario and conservatism
+        expected_revenue = (
+            metrics['revenue'] * 
+            scenario['volume_growth'] * 
+            scenario['deal_size_adjustment'] * 
+            conservatism
+        )
         
         results.append({
             'market_segment': segment,
-            'active_pipeline_deals': active_count,
-            'active_expected_revenue': active_rev,
-            'future_expected_deals': future_deals,
-            'future_expected_revenue': future_rev,
-            'total_expected_revenue': active_rev + future_rev,
+            'baseline_revenue': metrics['revenue'],
+            'expected_revenue': expected_revenue,
+            'source': 'future_projection'
         })
     
     return pd.DataFrame(results)
@@ -386,94 +331,93 @@ def aggregate_forecast(active_forecast, future_forecast):
 # BACKTESTING
 # =============================================================================
 
-def run_backtest(df, config, scenario, backtest_date, actuals_through):
+def run_backtest(df, config, scenario, backtest_date, target_impl_year):
     """
-    Validate forecast accuracy against historical actuals.
+    Backtest the model by forecasting a past implementation year.
     
-    Key principle: Only use data available as of backtest_date.
+    Example: On 2025-01-01, forecast impl_year=2025, then compare to actuals.
     """
     backtest_date = pd.to_datetime(backtest_date)
-    actuals_through = pd.to_datetime(actuals_through)
     
     print(f"\n{'='*70}")
-    print(f"BACKTEST: Forecasting {backtest_date.year} using data through {backtest_date.date()}")
+    print(f"BACKTEST: Implementation Year {target_impl_year}")
+    print(f"Forecast Date: {backtest_date.date()}")
     print(f"{'='*70}")
     
-    # === TRAINING DATA ===
-    training_summary = build_deal_summary(df, as_of_date=backtest_date)
-    training_df = df[df['date_snapshot'] <= backtest_date].copy()
+    # === STAGE CONVERSION RATES ===
+    stage_rates = calculate_stage_conversion_rates(df, backtest_date, target_impl_year, config)
     
-    closed_won = len(training_summary[training_summary['outcome'] == 'Closed Won'])
-    closed_lost = len(training_summary[training_summary['outcome'] == 'Closed Lost'])
-    open_deals = len(training_summary[training_summary['outcome'] == 'Open'])
-    
-    print(f"\nTraining Data (as of {backtest_date.date()}):")
-    print(f"  Closed Won: {closed_won}")
-    print(f"  Closed Lost: {closed_lost}")
-    print(f"  Open: {open_deals}")
-    
-    # === CALCULATE INPUTS ===
-    stage_rates = calculate_stage_conversion_rates(training_summary, config)
-    baseline = calculate_historical_closure_baseline(training_summary, backtest_date, config)
-    
-    print(f"\nStage Conversion Rates:")
+    print(f"\nStage Conversion Rates (from impl_year < {target_impl_year}):")
     for stage in config['active_stages']:
-        print(f"  {stage}: {stage_rates['_GLOBAL'][stage]*100:.1f}%")
+        rate = stage_rates['_GLOBAL'].get(stage, 0)
+        print(f"  {stage}: {rate*100:.1f}%")
+    
+    # === HISTORICAL BASELINE ===
+    baseline = calculate_historical_baseline(df, backtest_date, target_impl_year, config)
     
     if baseline:
         g = baseline['_GLOBAL']
-        print(f"\nHistorical Baseline (trailing {config['trailing_months']}mo):")
-        print(f"  {g['avg_monthly_deals']:.1f} deals/month")
-        print(f"  ${g['avg_monthly_revenue']:,.0f}/month")
-        print(f"  Conservatism factor: {config['future_conservatism']:.0%}")
+        print(f"\nHistorical Baseline (impl_year={g['impl_year']}):")
+        print(f"  Total Won: {g['total_deals']} deals, ${g['total_revenue']:,.0f}")
+        print(f"  Conservatism: {config['future_conservatism']:.0%}")
     
     # === ACTIVE PIPELINE ===
-    active_pipeline = get_active_pipeline(training_df, training_summary, backtest_date, config)
+    active_pipeline = get_active_pipeline_for_impl_year(df, backtest_date, target_impl_year, config)
     active_forecast = forecast_active_pipeline(active_pipeline, stage_rates, config, scenario)
     
     active_value = active_pipeline['net_revenue'].sum() if not active_pipeline.empty else 0
     active_expected = active_forecast['expected_revenue'].sum() if not active_forecast.empty else 0
+    active_count = len(active_pipeline)
     
-    print(f"\nActive Pipeline:")
-    print(f"  Deals: {len(active_pipeline)}")
+    print(f"\nActive Pipeline (impl_year={target_impl_year}):")
+    print(f"  Deals: {active_count}")
     print(f"  Total Value: ${active_value:,.0f}")
     print(f"  Expected Value: ${active_expected:,.0f}")
     
+    if not active_pipeline.empty:
+        print(f"\n  By Segment:")
+        for seg in active_pipeline['market_segment'].unique():
+            seg_deals = active_pipeline[active_pipeline['market_segment'] == seg]
+            seg_forecast = active_forecast[active_forecast['market_segment'] == seg] if not active_forecast.empty else pd.DataFrame()
+            seg_exp = seg_forecast['expected_revenue'].sum() if not seg_forecast.empty else 0
+            print(f"    {seg}: {len(seg_deals)} deals, ${seg_deals['net_revenue'].sum():,.0f} value, ${seg_exp:,.0f} expected")
+    
     # === FUTURE PIPELINE ===
-    forecast_months = pd.period_range(
-        start=backtest_date.to_period('M'),
-        end=actuals_through.to_period('M'),
-        freq='M'
-    )
-    future_forecast = forecast_future_pipeline(baseline, forecast_months, config, scenario)
+    future_forecast = forecast_future_pipeline(baseline, config, scenario)
     future_expected = future_forecast['expected_revenue'].sum() if not future_forecast.empty else 0
     
-    print(f"\nFuture Pipeline ({len(forecast_months)} months):")
+    print(f"\nFuture Pipeline Projection:")
     print(f"  Expected Revenue: ${future_expected:,.0f}")
     
     # === TOTAL FORECAST ===
     total_forecast = active_expected + future_expected
+    
     print(f"\n{'─'*40}")
     print(f"TOTAL FORECAST: ${total_forecast:,.0f}")
+    print(f"  Active Pipeline: ${active_expected:,.0f}")
+    print(f"  Future Deals: ${future_expected:,.0f}")
     print(f"{'─'*40}")
     
     # === ACTUALS ===
-    full_summary = build_deal_summary(df, as_of_date=actuals_through)
-    actual_closed = full_summary[
-        (full_summary['outcome'] == 'Closed Won') &
-        (full_summary['date_closed'] > backtest_date) &
-        (full_summary['date_closed'] <= actuals_through)
+    # Get all deals with target implementation year that ultimately closed won
+    outcomes = get_deal_outcomes(df)
+    actual_won = outcomes[
+        (outcomes['outcome'] == 'Won') &
+        (outcomes['impl_year'] == target_impl_year)
     ]
     
-    carryover = actual_closed[actual_closed['date_created'] < backtest_date]
-    new_deals = actual_closed[actual_closed['date_created'] >= backtest_date]
+    total_actual = actual_won['net_revenue'].sum()
+    actual_deals = len(actual_won)
     
-    total_actual = actual_closed['net_revenue'].sum()
+    # Split: which were in active pipeline vs created later
+    active_deal_ids = set(active_pipeline['deal_id']) if not active_pipeline.empty else set()
+    actual_from_active = actual_won[actual_won['deal_id'].isin(active_deal_ids)]
+    actual_from_future = actual_won[~actual_won['deal_id'].isin(active_deal_ids)]
     
-    print(f"\nACTUALS:")
-    print(f"  Total: {len(actual_closed)} deals, ${total_actual:,.0f}")
-    print(f"  Carryover: {len(carryover)} deals, ${carryover['net_revenue'].sum():,.0f}")
-    print(f"  New: {len(new_deals)} deals, ${new_deals['net_revenue'].sum():,.0f}")
+    print(f"\nACTUALS (impl_year={target_impl_year}):")
+    print(f"  Total Won: {actual_deals} deals, ${total_actual:,.0f}")
+    print(f"  From Active Pipeline: {len(actual_from_active)} deals, ${actual_from_active['net_revenue'].sum():,.0f}")
+    print(f"  From Future Deals: {len(actual_from_future)} deals, ${actual_from_future['net_revenue'].sum():,.0f}")
     
     # === VARIANCE ===
     variance_pct = ((total_forecast - total_actual) / total_actual * 100) if total_actual > 0 else 0
@@ -491,53 +435,83 @@ def run_backtest(df, config, scenario, backtest_date, actuals_through):
     print(f"{'='*70}")
     
     # === SEGMENT BREAKDOWN ===
-    actual_by_seg = actual_closed.groupby('market_segment').agg({
+    print(f"\nSegment Breakdown:")
+    
+    actual_by_seg = actual_won.groupby('market_segment').agg({
         'deal_id': 'count',
         'net_revenue': 'sum'
     }).reset_index()
     actual_by_seg.columns = ['market_segment', 'actual_deals', 'actual_revenue']
     
-    forecast_summary = aggregate_forecast(active_forecast, future_forecast)
+    forecast_by_seg = []
+    all_segments = set(actual_by_seg['market_segment'].tolist())
     
-    comparison = pd.merge(actual_by_seg, forecast_summary, on='market_segment', how='outer').fillna(0)
-    comparison['variance_pct'] = comparison.apply(
-        lambda r: ((r['total_expected_revenue'] - r['actual_revenue']) / r['actual_revenue'] * 100)
-        if r['actual_revenue'] > 0 else 0, axis=1
-    )
+    if not active_forecast.empty:
+        all_segments.update(active_forecast['market_segment'].unique())
+    if not future_forecast.empty:
+        all_segments.update(future_forecast['market_segment'].unique())
     
-    print(f"\nSegment Breakdown:")
-    for _, row in comparison.iterrows():
-        print(f"  {row['market_segment']}:")
-        print(f"    Actual: ${row['actual_revenue']:,.0f}")
-        print(f"    Forecast: ${row['total_expected_revenue']:,.0f}")
-        print(f"    Variance: {row['variance_pct']:+.1f}%")
+    for seg in all_segments:
+        active_exp = active_forecast[active_forecast['market_segment'] == seg]['expected_revenue'].sum() if not active_forecast.empty else 0
+        future_exp = future_forecast[future_forecast['market_segment'] == seg]['expected_revenue'].sum() if not future_forecast.empty else 0
+        actual_rev = actual_by_seg[actual_by_seg['market_segment'] == seg]['actual_revenue'].sum() if len(actual_by_seg[actual_by_seg['market_segment'] == seg]) > 0 else 0
+        
+        var = ((active_exp + future_exp - actual_rev) / actual_rev * 100) if actual_rev > 0 else 0
+        
+        print(f"  {seg}:")
+        print(f"    Actual: ${actual_rev:,.0f}")
+        print(f"    Forecast: ${active_exp + future_exp:,.0f} (active: ${active_exp:,.0f}, future: ${future_exp:,.0f})")
+        print(f"    Variance: {var:+.1f}%")
+        
+        forecast_by_seg.append({
+            'market_segment': seg,
+            'actual_revenue': actual_rev,
+            'active_expected': active_exp,
+            'future_expected': future_exp,
+            'total_expected': active_exp + future_exp,
+            'variance_pct': var
+        })
+    
+    # === ACTIVE PIPELINE CONVERSION ANALYSIS ===
+    if not active_pipeline.empty and len(actual_from_active) > 0:
+        print(f"\nActive Pipeline Conversion Analysis:")
+        
+        for seg in active_pipeline['market_segment'].unique():
+            seg_active = active_pipeline[active_pipeline['market_segment'] == seg]
+            seg_won = actual_from_active[actual_from_active['market_segment'] == seg]
+            
+            if len(seg_active) > 0:
+                conv_rate = len(seg_won) / len(seg_active) * 100
+                value_conv = seg_won['net_revenue'].sum() / seg_active['net_revenue'].sum() * 100 if seg_active['net_revenue'].sum() > 0 else 0
+                
+                print(f"  {seg}:")
+                print(f"    Pipeline: {len(seg_active)} deals, ${seg_active['net_revenue'].sum():,.0f}")
+                print(f"    Won: {len(seg_won)} deals, ${seg_won['net_revenue'].sum():,.0f}")
+                print(f"    Deal Conversion: {conv_rate:.1f}%")
+                print(f"    Value Conversion: {value_conv:.1f}%")
     
     return {
         'total_forecast': total_forecast,
         'total_actual': total_actual,
         'variance_pct': variance_pct,
-        'comparison': comparison,
         'active_forecast': active_forecast,
         'future_forecast': future_forecast,
         'stage_rates': stage_rates,
         'baseline': baseline,
-        'config_used': config,
-        'scenario_used': scenario,
+        'comparison': pd.DataFrame(forecast_by_seg),
     }
 
-# =============================================================================
-# EXPORT
-# =============================================================================
 
-def export_results(results, config):
-    """Export forecast and validation results."""
+def export_results(results, config, target_impl_year):
+    """Export validation results."""
     validation_path = Path(config['validation_export_path'])
     validation_path.mkdir(parents=True, exist_ok=True)
     
-    results['comparison'].to_csv(validation_path / 'backtest_results.csv', index=False)
+    results['comparison'].to_csv(validation_path / f'backtest_impl{target_impl_year}.csv', index=False)
     
     summary = {
-        'model_version': 'V2',
+        'model_version': 'V3-ImplYear',
+        'target_impl_year': target_impl_year,
         'total_forecast': float(results['total_forecast']),
         'total_actual': float(results['total_actual']),
         'variance_pct': float(results['variance_pct']),
@@ -547,74 +521,49 @@ def export_results(results, config):
             for k, v in results['stage_rates'].items()
         },
         'config': {
-            'trailing_months': config['trailing_months'],
             'future_conservatism': config['future_conservatism'],
             'min_deals_for_segment': config['min_deals_for_segment'],
         },
         'generated_at': datetime.now().isoformat()
     }
     
-    with open(validation_path / 'backtest_summary.json', 'w') as f:
+    with open(validation_path / f'backtest_impl{target_impl_year}_summary.json', 'w') as f:
         json.dump(summary, f, indent=2, default=str)
     
     print(f"\nResults exported to {validation_path}/")
+
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
-def run_forecast():
-    """Main entry point."""
+def main():
     print("="*70)
-    print("Pipeline Revenue Forecasting Model V2")
+    print("Pipeline Revenue Forecasting Model V3")
+    print("Forecasting by IMPLEMENTATION YEAR")
     print("="*70)
     
-    scenario = SCENARIOS.get(SCENARIO, SCENARIOS['base'])
-    print(f"\nScenario: {SCENARIO}")
-    print(f"  {scenario.get('description', '')}")
-    
-    if GENERATE_MOCK:
-        from generate_mock import generate_mock_data
-        generate_mock_data(output_path=CONFIG['data_path'])
-    
+    # Load data
     df = load_data(CONFIG)
     print(f"\nLoaded {len(df):,} snapshot records")
     print(f"Date range: {df['date_snapshot'].min().date()} to {df['date_snapshot'].max().date()}")
+    print(f"Implementation years: {sorted(df['impl_year'].dropna().unique())}")
     
-    if RUN_BACKTEST:
-        results = run_backtest(df, CONFIG, scenario, BACKTEST_DATE, ACTUALS_THROUGH)
-        export_results(results, CONFIG)
-        return results
+    # Backtest: Forecast 2025 implementation year as of 2025-01-01
+    scenario = SCENARIOS['base']
     
-    # Production forecast (non-backtest mode)
-    deal_summary = build_deal_summary(df)
-    stage_rates = calculate_stage_conversion_rates(deal_summary, CONFIG)
-    training_end = df['date_snapshot'].max()
-    baseline = calculate_historical_closure_baseline(deal_summary, training_end, CONFIG)
-    
-    active_pipeline = get_active_pipeline(df, deal_summary, training_end, CONFIG)
-    active_forecast = forecast_active_pipeline(active_pipeline, stage_rates, CONFIG, scenario)
-    
-    forecast_months = pd.period_range(
-        start=f"{CONFIG['forecast_year']}-01",
-        end=f"{CONFIG['forecast_year']}-12",
-        freq='M'
+    results = run_backtest(
+        df=df,
+        config=CONFIG,
+        scenario=scenario,
+        backtest_date='2025-01-01',
+        target_impl_year=2025
     )
-    future_forecast = forecast_future_pipeline(baseline, forecast_months, CONFIG, scenario)
     
-    total = (active_forecast['expected_revenue'].sum() + 
-             future_forecast['expected_revenue'].sum())
+    export_results(results, CONFIG, target_impl_year=2025)
     
-    print(f"\n{CONFIG['forecast_year']} Forecast: ${total:,.0f}")
-    
-    return {
-        'active_forecast': active_forecast,
-        'future_forecast': future_forecast,
-        'total_forecast': total,
-        'stage_rates': stage_rates,
-        'baseline': baseline,
-    }
+    return results
 
 
 if __name__ == "__main__":
-    run_forecast()
+    main()
