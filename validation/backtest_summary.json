@@ -1,5 +1,10 @@
 {
-  "total_forecast": 17465872.860240847,
+  "total_forecast": 18554321.060800586,
   "total_actual": 11434475.0192,
-  "overall_variance_pct": 52.74748364846946
+  "overall_variance_pct": 62.26648822657287,
+  "calibrated_scenario": {
+    "win_rate_uplift": 1.0,
+    "deal_volume_growth": 1.766768292682927,
+    "revenue_per_deal_uplift": 0.8896647988544424
+  }
 }
