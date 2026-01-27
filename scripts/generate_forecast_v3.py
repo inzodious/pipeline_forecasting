@@ -12,6 +12,7 @@ warnings.filterwarnings('ignore')
 CONFIG = {
     'data_path': 'data/fact_snapshots.csv',
     'validation_export_path': 'validation/',
+    'forecast_export_path': 'exports/',
     'active_stages': ['Qualified', 'Alignment', 'Solutioning', 'Verbal'],
     'min_deals_for_segment': 10,
     'trailing_months': 12,
@@ -120,7 +121,8 @@ def forecast_active_pipeline(active_pipeline, stage_rates, config, scenario):
         results.append({
             'deal_id': deal['deal_id'], 'market_segment': segment, 'stage': stage, 
             'forecast_dt': deal['forecast_dt'], # EOM Date
-            'net_revenue': revenue, 'expected_revenue': revenue * adjusted_rate * scenario['deal_size_adjustment']
+            'net_revenue': revenue, 'expected_revenue': revenue * adjusted_rate * scenario['deal_size_adjustment'],
+            'source': 'active_pipeline'
         })
     return pd.DataFrame(results)
 
@@ -148,7 +150,7 @@ def forecast_future_pipeline(baseline, config, scenario, target_year):
             
     return pd.DataFrame(results)
 
-### 7. Backtesting and Execution
+### 7. Core Logic: Backtest & Forecast
 def run_backtest(df, config, scenario, backtest_date, target_year):
     backtest_date = pd.to_datetime(backtest_date)
     
@@ -171,7 +173,6 @@ def run_backtest(df, config, scenario, backtest_date, target_year):
     variance_pct = ((total_forecast - total_actual) / total_actual * 100) if total_actual > 0 else 0
     
     # Monthly Breakdown (Actual vs Forecast)
-    # Combine Active + Future Forecasts
     all_forecasts = pd.concat([
         active_forecast[['forecast_dt', 'expected_revenue']], 
         future_forecast[['forecast_dt', 'expected_revenue']]
@@ -185,38 +186,51 @@ def run_backtest(df, config, scenario, backtest_date, target_year):
 
     return {
         'total_forecast': total_forecast, 'total_actual': total_actual, 'variance_pct': variance_pct,
-        'active_forecast': active_forecast, 'future_forecast': future_forecast,
-        'stage_rates': stage_rates, 'baseline': baseline, 
         'comparison': comparison_df.sort_values('forecast_dt'),
     }
 
-def export_results(results, config, target_year):
+def run_forecast(df, config, scenario, target_year):
+    """Generates the future forecast using the latest available data."""
+    # Use latest snapshot as 'today'
+    as_of_date = df['date_snapshot'].max()
+    
+    stage_rates = calculate_stage_conversion_rates(df, as_of_date, target_year, config)
+    baseline = calculate_historical_baseline(df, as_of_date, target_year, config)
+    
+    active_pipeline = get_active_pipeline_for_year(df, as_of_date, target_year, config)
+    active_forecast = forecast_active_pipeline(active_pipeline, stage_rates, config, scenario)
+    future_forecast = forecast_future_pipeline(baseline, config, scenario, target_year)
+    
+    total_forecast = pd.concat([active_forecast, future_forecast]) if not active_forecast.empty or not future_forecast.empty else pd.DataFrame()
+    return total_forecast
+
+### 8. Exports & Main
+def export_backtest_results(results, config, target_year):
     validation_path = Path(config['validation_export_path'])
     validation_path.mkdir(parents=True, exist_ok=True)
-    
-    # Export EOM breakdown
-    filename = f"backtest_{config['forecast_basis']}_{target_year}.csv"
-    results['comparison'].to_csv(validation_path / filename, index=False)
-    
-    summary = {
-        'basis': config['forecast_basis'], 'target_year': target_year,
-        'total_forecast': float(results['total_forecast']), 'total_actual': float(results['total_actual']),
-        'variance_pct': float(results['variance_pct']),
-        'config': {'future_conservatism': config['future_conservatism']},
-        'generated_at': datetime.now().isoformat()
-    }
-    
-    with open(validation_path / f"backtest_{config['forecast_basis']}_{target_year}_summary.json", 'w') as f:
-        json.dump(summary, f, indent=2, default=str)
+    results['comparison'].to_csv(validation_path / f"backtest_{config['forecast_basis']}_{target_year}.csv", index=False)
 
-### 8. Main
+def export_forecast_results(forecast_df, config, target_year):
+    export_path = Path(config['forecast_export_path'])
+    export_path.mkdir(parents=True, exist_ok=True)
+    
+    filename = f"forecast_{config['forecast_basis']}_{target_year}.csv"
+    
+    # Group by Month and Segment for cleaner output
+    summary_df = forecast_df.groupby(['forecast_dt', 'market_segment', 'source'])['expected_revenue'].sum().reset_index()
+    summary_df.to_csv(export_path / filename, index=False)
+
 def main():
     df = load_data(CONFIG)
     scenario = SCENARIOS['base']
-    # Forecast 2025 using the basis defined in CONFIG
-    results = run_backtest(df=df, config=CONFIG, scenario=scenario, backtest_date='2025-01-01', target_year=2025)
-    export_results(results, CONFIG, target_year=2025)
-    return results
+    
+    # 1. Run Validation (Backtest 2025)
+    backtest_results = run_backtest(df=df, config=CONFIG, scenario=scenario, backtest_date='2025-01-01', target_year=2025)
+    export_backtest_results(backtest_results, CONFIG, target_year=2025)
+    
+    # 2. Run Future Forecast (2026)
+    forecast_2026 = run_forecast(df=df, config=CONFIG, scenario=scenario, target_year=2026)
+    export_forecast_results(forecast_2026, CONFIG, target_year=2026)
 
 if __name__ == "__main__":
     main()
