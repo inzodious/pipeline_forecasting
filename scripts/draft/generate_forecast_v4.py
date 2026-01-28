@@ -218,10 +218,11 @@ def forecast_active_pipeline(df, stage_probs, staleness):
 # ======================================================
 
 def forecast_future_pipeline(deals, curves):
-    base = (
-        deals.groupby(['market_segment', 'created_month'])
+    # 1. Calculate average monthly volume/size from history to use as a baseline
+    baseline_assumptions = (
+        deals.groupby('market_segment')
              .agg(
-                 volume=('deal_id', 'count'),
+                 avg_monthly_vol=('deal_id', lambda x: x.count() / deals['created_month'].nunique()),
                  avg_size=('net_revenue', 'mean')
              )
              .reset_index()
@@ -230,38 +231,38 @@ def forecast_future_pipeline(deals, curves):
     months = pd.period_range(FORECAST_START, FORECAST_END, freq='M')
     rows = []
 
-    for _, r in base.iterrows():
-        for m in months:
-            age_weeks = max((m.to_timestamp() - r['created_month'].to_timestamp()).days // 7, 0)
-            rows.append({
-                'month': m.to_timestamp(),
-                'market_segment': r['market_segment'],
-                'age_weeks': age_weeks,
-                'volume': r['volume'] * SCENARIO_LEVERS['volume_multiplier'],
-                'avg_size': r['avg_size'] * SCENARIO_LEVERS['deal_size_multiplier']
-            })
+    for m_created in months:
+        for _, r in baseline_assumptions.iterrows():
 
-    future = pd.DataFrame(rows)
+            vol = r['avg_monthly_vol'] * SCENARIO_LEVERS['volume_multiplier']
+            size = r['avg_size'] * SCENARIO_LEVERS['deal_size_multiplier']
+            total_cohort_value = vol * size
+            
+            for m_forecast in months:
+                if m_forecast < m_created:
+                    continue
+                
+                age_weeks_now = (m_forecast.to_timestamp() - m_created.to_timestamp()).days // 7
+                age_weeks_prev = max(age_weeks_now - 4, 0)
 
-    future = future.merge(
-        curves,
-        left_on=['market_segment', 'age_weeks'],
-        right_on=['market_segment', 'weeks_to_close'],
-        how='left'
-    )
+                segment_curve = curves[curves['market_segment'] == r['market_segment']]
+                
+                rate_now = segment_curve.loc[segment_curve['weeks_to_close'] <= age_weeks_now, 'cum_win_pct'].max()
+                if pd.isna(rate_now): rate_now = segment_curve['cum_win_pct'].max()
+                
+                rate_prev = segment_curve.loc[segment_curve['weeks_to_close'] <= age_weeks_prev, 'cum_win_pct'].max()
+                if pd.isna(rate_prev): rate_prev = 0
+                
+                marginal_win_pct = max(rate_now - rate_prev, 0)
+                
+                rows.append({
+                    'month': m_forecast.to_timestamp(),
+                    'market_segment': r['market_segment'],
+                    'expected_revenue': total_cohort_value * marginal_win_pct * SCENARIO_LEVERS['win_rate_multiplier'],
+                    'expected_count': vol * marginal_win_pct * SCENARIO_LEVERS['win_rate_multiplier']
+                })
 
-    future['cum_win_pct'] = (
-        future.groupby('market_segment')['cum_win_pct']
-              .ffill()
-              .fillna(0)
-    )
-
-    future['cum_win_pct'] *= SCENARIO_LEVERS['win_rate_multiplier']
-
-    future['expected_revenue'] = future['volume'] * future['avg_size'] * future['cum_win_pct']
-    future['expected_count'] = future['volume'] * future['cum_win_pct']
-
-    return future[['month', 'market_segment', 'expected_revenue', 'expected_count']]
+    return pd.DataFrame(rows)
 
 # ======================================================
 # GOAL SEEK
