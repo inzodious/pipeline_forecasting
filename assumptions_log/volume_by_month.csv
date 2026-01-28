@@ -1,0 +1,146 @@
+market_segment,created_month,deals_created
+Indirect,2022-11,1
+Indirect,2022-12,1
+Indirect,2023-01,2
+Indirect,2023-03,2
+Indirect,2023-04,7
+Indirect,2023-05,8
+Indirect,2023-06,3
+Indirect,2023-07,4
+Indirect,2023-08,5
+Indirect,2023-09,6
+Indirect,2023-10,13
+Indirect,2023-11,10
+Indirect,2023-12,15
+Indirect,2024-01,44
+Indirect,2024-02,50
+Indirect,2024-03,282
+Indirect,2024-04,33
+Indirect,2024-05,58
+Indirect,2024-06,40
+Indirect,2024-07,43
+Indirect,2024-08,54
+Indirect,2024-09,35
+Indirect,2024-10,33
+Indirect,2024-11,72
+Indirect,2024-12,51
+Indirect,2025-01,49
+Indirect,2025-02,55
+Indirect,2025-03,56
+Indirect,2025-04,87
+Indirect,2025-05,91
+Indirect,2025-06,61
+Indirect,2025-07,42
+Indirect,2025-08,51
+Indirect,2025-09,39
+Indirect,2025-10,92
+Indirect,2025-11,70
+Indirect,2025-12,49
+Large Market,2022-05,1
+Large Market,2022-06,1
+Large Market,2022-07,1
+Large Market,2022-09,1
+Large Market,2022-11,1
+Large Market,2022-12,1
+Large Market,2023-01,1
+Large Market,2023-02,3
+Large Market,2023-03,6
+Large Market,2023-04,3
+Large Market,2023-05,7
+Large Market,2023-06,10
+Large Market,2023-07,5
+Large Market,2023-08,1
+Large Market,2023-09,8
+Large Market,2023-10,8
+Large Market,2023-11,6
+Large Market,2023-12,1
+Large Market,2024-01,11
+Large Market,2024-02,10
+Large Market,2024-03,15
+Large Market,2024-04,14
+Large Market,2024-05,6
+Large Market,2024-06,13
+Large Market,2024-07,7
+Large Market,2024-08,7
+Large Market,2024-09,5
+Large Market,2024-10,5
+Large Market,2024-11,6
+Large Market,2024-12,5
+Large Market,2025-01,7
+Large Market,2025-02,8
+Large Market,2025-03,9
+Large Market,2025-04,7
+Large Market,2025-05,9
+Large Market,2025-06,4
+Large Market,2025-07,3
+Large Market,2025-09,1
+Large Market,2025-10,2
+Large Market,2025-11,6
+Large Market,2025-12,2
+Mid Market,2022-01,1
+Mid Market,2022-05,1
+Mid Market,2022-09,1
+Mid Market,2022-11,1
+Mid Market,2023-02,1
+Mid Market,2023-03,3
+Mid Market,2023-04,4
+Mid Market,2023-05,6
+Mid Market,2023-06,15
+Mid Market,2023-07,19
+Mid Market,2023-08,25
+Mid Market,2023-09,32
+Mid Market,2023-10,41
+Mid Market,2023-11,54
+Mid Market,2023-12,39
+Mid Market,2024-01,62
+Mid Market,2024-02,85
+Mid Market,2024-03,98
+Mid Market,2024-04,110
+Mid Market,2024-05,124
+Mid Market,2024-06,103
+Mid Market,2024-07,86
+Mid Market,2024-08,113
+Mid Market,2024-09,88
+Mid Market,2024-10,50
+Mid Market,2024-11,35
+Mid Market,2024-12,21
+Mid Market,2025-01,38
+Mid Market,2025-02,62
+Mid Market,2025-03,101
+Mid Market,2025-04,107
+Mid Market,2025-05,140
+Mid Market,2025-06,127
+Mid Market,2025-07,131
+Mid Market,2025-08,112
+Mid Market,2025-09,86
+Mid Market,2025-10,59
+Mid Market,2025-11,25
+Mid Market,2025-12,3
+Other,2024-11,1
+Other,2025-06,1
+Other,2025-12,1
+SMB,2023-11,9
+SMB,2023-12,28
+SMB,2024-01,69
+SMB,2024-02,89
+SMB,2024-03,80
+SMB,2024-04,92
+SMB,2024-05,93
+SMB,2024-06,79
+SMB,2024-07,81
+SMB,2024-08,132
+SMB,2024-09,116
+SMB,2024-10,92
+SMB,2024-11,37
+SMB,2024-12,23
+SMB,2025-01,42
+SMB,2025-02,55
+SMB,2025-03,26
+SMB,2025-04,63
+SMB,2025-05,42
+SMB,2025-06,35
+SMB,2025-07,50
+SMB,2025-08,50
+SMB,2025-09,81
+SMB,2025-10,62
+SMB,2025-11,19

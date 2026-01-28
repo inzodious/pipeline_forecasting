@@ -29,8 +29,8 @@ SCENARIOS = {
         'deal_size_adjustment': 1.0,
     },
     'conservative': {
-        'volume_growth': 0.85, 
-        'win_rate_adjustment': 0.90, 
+        'volume_growth': 1.1, 
+        'win_rate_adjustment': 0.8, 
         'deal_size_adjustment': 1.0,
     },
 }

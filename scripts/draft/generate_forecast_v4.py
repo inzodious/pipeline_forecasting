@@ -29,9 +29,8 @@ SCENARIO_LEVERS = {
 RUN_GOAL_SEEK = True
 GOAL_SEEK_MODE = 'volume'   # 'volume' or 'win_rate'
 GOAL_WON_REVENUE = {
-    'Large Market': 14_000_000,
-    'Mid Market/SMB': 7_000_000,
-    'Indirect': 3_000_000
+    'Large Market': 14_750_000,
+    'Mid Market': 7_800_000
 }
 
 STALENESS_PENALTY = 0.8
@@ -77,8 +76,12 @@ def build_deal_facts(df):
         .reset_index()[['deal_id', 'date_closed', 'stage']]
     )
 
+    first = first.drop(columns=['stage', 'date_closed'])
+
     deals = first.merge(closed, on='deal_id', how='left')
+    
     deals['created_month'] = deals['date_created'].dt.to_period('M')
+    
     deals['won'] = deals['stage'] == 'Closed Won'
 
     return deals
