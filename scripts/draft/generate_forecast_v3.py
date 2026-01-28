@@ -1,4 +1,3 @@
-### 1. Imports and Configuration
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -18,8 +17,6 @@ CONFIG = {
     'trailing_months': 12,
     'future_conservatism': 0.85,
     'default_conversion_rate': 0.25,
-    
-    # TOGGLE LOGIC: 'implementation' or 'close'
     'forecast_basis': 'implementation', 
 }
 
@@ -29,17 +26,13 @@ SCENARIOS = {
     'conservative': {'volume_growth': 0.85, 'win_rate_adjustment': 0.90, 'deal_size_adjustment': 1.0},
 }
 
-### 2. Data Loading & Date Handling
 def load_data(config):
     df = pd.read_csv(config['data_path'], parse_dates=['date_snapshot', 'date_created', 'date_closed', 'date_implementation'])
     df['market_segment'] = df['market_segment'].fillna('Unknown')
     df['net_revenue'] = pd.to_numeric(df['net_revenue'], errors='coerce').fillna(0)
     
-    # Select basis column
     basis_col = 'date_implementation' if config['forecast_basis'] == 'implementation' else 'date_closed'
     
-    # Create normalized EOM date and Year for the chosen basis
-    # NOTE: For open deals, we assume 'date_closed' represents the Target Close Date
     df['forecast_dt'] = df[basis_col] + MonthEnd(0)
     df['forecast_year'] = df['forecast_dt'].dt.year
     
@@ -55,10 +48,8 @@ def get_deal_outcomes(df):
     latest['outcome'] = latest['stage'].apply(lambda x: 'Won' if x == 'Closed Won' else ('Lost' if x == 'Closed Lost' else 'Open'))
     return latest
 
-### 3. Stage Conversion Rates
 def calculate_stage_conversion_rates(df, as_of_date, target_year, config):
     as_of = pd.to_datetime(as_of_date)
-    # Train on deals where the target date (impl or close) is in the past
     closed_deals = df[(df['date_closed'].notna()) & (df['date_closed'] <= as_of) & (df['forecast_year'] < target_year)].copy()
     
     final_state = closed_deals.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
@@ -84,13 +75,11 @@ def calculate_stage_conversion_rates(df, as_of_date, target_year, config):
     
     return rates
 
-### 4. Historical Baseline
 def calculate_historical_baseline(df, as_of_date, target_year, config):
     as_of = pd.to_datetime(as_of_date)
     closed_won = df[(df['stage'] == 'Closed Won') & (df['date_closed'].notna()) & (df['date_closed'] <= as_of)].copy()
     won_deals = closed_won.sort_values('date_snapshot').groupby('deal_id').last().reset_index()
     
-    # Baseline is the previous year's performance based on the chosen date basis
     baseline_deals = won_deals[won_deals['forecast_year'] == (target_year - 1)]
     if len(baseline_deals) == 0: return None
     
@@ -105,7 +94,6 @@ def calculate_historical_baseline(df, as_of_date, target_year, config):
     
     return baseline
 
-### 5. Active Pipeline Forecast
 def get_active_pipeline_for_year(df, as_of_date, target_year, config):
     latest = get_latest_state(df, as_of_date)
     return latest[(latest['stage'].isin(config['active_stages'])) & (latest['forecast_year'] == target_year)].copy()
@@ -120,24 +108,20 @@ def forecast_active_pipeline(active_pipeline, stage_rates, config, scenario):
         
         results.append({
             'deal_id': deal['deal_id'], 'market_segment': segment, 'stage': stage, 
-            'forecast_dt': deal['forecast_dt'], # EOM Date
+            'forecast_dt': deal['forecast_dt'], 
             'net_revenue': revenue, 'expected_revenue': revenue * adjusted_rate * scenario['deal_size_adjustment'],
             'source': 'active_pipeline'
         })
     return pd.DataFrame(results)
 
-### 6. Future Pipeline Forecast
 def forecast_future_pipeline(baseline, config, scenario, target_year):
     if baseline is None: return pd.DataFrame()
     results = []
     for segment, metrics in baseline.items():
         if segment == '_GLOBAL': continue
         
-        # Calculate yearly total
         expected_revenue_annual = metrics['revenue'] * scenario['volume_growth'] * scenario['deal_size_adjustment'] * config.get('future_conservatism', 0.85)
         
-        # Distribute evenly across months for EOM attribution (Simplistic distribution)
-        # In a production environment, you might apply seasonality curves here
         monthly_rev = expected_revenue_annual / 12
         for month in range(1, 13):
             eom_date = pd.Timestamp(year=target_year, month=month, day=1) + MonthEnd(0)
@@ -150,7 +134,6 @@ def forecast_future_pipeline(baseline, config, scenario, target_year):
             
     return pd.DataFrame(results)
 
-### 7. Core Logic: Backtest & Forecast
 def run_backtest(df, config, scenario, backtest_date, target_year):
     backtest_date = pd.to_datetime(backtest_date)
     
@@ -166,13 +149,11 @@ def run_backtest(df, config, scenario, backtest_date, target_year):
     
     total_forecast = active_expected + future_expected
     
-    # Calculate Actuals
     outcomes = get_deal_outcomes(df)
     actual_won = outcomes[(outcomes['outcome'] == 'Won') & (outcomes['forecast_year'] == target_year)]
     total_actual = actual_won['net_revenue'].sum()
     variance_pct = ((total_forecast - total_actual) / total_actual * 100) if total_actual > 0 else 0
     
-    # Monthly Breakdown (Actual vs Forecast)
     all_forecasts = pd.concat([
         active_forecast[['forecast_dt', 'expected_revenue']], 
         future_forecast[['forecast_dt', 'expected_revenue']]
@@ -190,8 +171,6 @@ def run_backtest(df, config, scenario, backtest_date, target_year):
     }
 
 def run_forecast(df, config, scenario, target_year):
-    """Generates the future forecast using the latest available data."""
-    # Use latest snapshot as 'today'
     as_of_date = df['date_snapshot'].max()
     
     stage_rates = calculate_stage_conversion_rates(df, as_of_date, target_year, config)
@@ -204,7 +183,6 @@ def run_forecast(df, config, scenario, target_year):
     total_forecast = pd.concat([active_forecast, future_forecast]) if not active_forecast.empty or not future_forecast.empty else pd.DataFrame()
     return total_forecast
 
-### 8. Exports & Main
 def export_backtest_results(results, config, target_year):
     validation_path = Path(config['validation_export_path'])
     validation_path.mkdir(parents=True, exist_ok=True)
@@ -216,7 +194,6 @@ def export_forecast_results(forecast_df, config, target_year):
     
     filename = f"forecast_{config['forecast_basis']}_{target_year}.csv"
     
-    # Group by Month and Segment for cleaner output
     summary_df = forecast_df.groupby(['forecast_dt', 'market_segment', 'source'])['expected_revenue'].sum().reset_index()
     summary_df.to_csv(export_path / filename, index=False)
 
@@ -224,11 +201,9 @@ def main():
     df = load_data(CONFIG)
     scenario = SCENARIOS['base']
     
-    # 1. Run Validation (Backtest 2025)
     backtest_results = run_backtest(df=df, config=CONFIG, scenario=scenario, backtest_date='2025-01-01', target_year=2025)
     export_backtest_results(backtest_results, CONFIG, target_year=2025)
     
-    # 2. Run Future Forecast (2026)
     forecast_2026 = run_forecast(df=df, config=CONFIG, scenario=scenario, target_year=2026)
     export_forecast_results(forecast_2026, CONFIG, target_year=2026)
 
