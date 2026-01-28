@@ -1,0 +1,7 @@
+market_segment,stage,wins,total,win_rate
+Indirect,Closed Lost,0,5435,0.0
+Indirect,Closed Won,5172,5172,1.0
+Large Market,Closed Lost,0,1217,0.0
+Large Market,Closed Won,769,769,1.0
+Mid Market/SMB,Closed Lost,0,3065,0.0
+Mid Market/SMB,Closed Won,2399,2399,1.0
