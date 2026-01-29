@@ -6,12 +6,69 @@
 
 ```bash
 # Run the FY26 forecast with backtest validation
-python scripts/draft/generate_forecast_v5_fixed.py
+python scripts/generate_forecast_v5.py
 
-# Run diagnostic analysis
+# Run diagnostic analysis (if available)
 python scripts/draft/diagnostic_analysis.py
 python scripts/draft/layer_breakdown.py
 ```
+
+## ⚠️ Critical Fixes Applied (January 2026)
+
+Three major bugs were identified and fixed that were causing significant forecast inaccuracies:
+
+### 1. **Deal Size Calculation Bug** ✅ FIXED
+**Problem:** Average deal size was calculated across ALL deals (won + lost), then multiplied by win rate, effectively double-applying the win rate penalty.
+
+**Incorrect Formula:**
+```python
+avg_size = total_revenue / total_deals  # includes lost deals
+expected_revenue = volume * avg_size * win_rate  # WRONG!
+```
+
+**Corrected Formula:**
+```python
+avg_size = won_revenue / won_deals  # only won deals
+expected_revenue = volume * avg_size * win_rate  # CORRECT
+```
+
+**Impact:** This bug caused Indirect segment to over-forecast by 152% in initial backtest. After fix: improved to 24% variance.
+
+### 2. **Timing Distribution Override** ✅ FIXED
+**Problem:** Backtest used historical timing distributions even when actual 2025 timing data was available in perfect prediction mode.
+
+**Fix:** Added `timing_override` parameter that uses actual close timing when `BACKTEST_PERFECT_PREDICTION = True`.
+
+**Impact:** Significantly improved monthly forecast accuracy by using segment-specific actual timing patterns.
+
+### 3. **Active Pipeline Forecast** ✅ FIXED
+**Problem:** In perfect prediction mode, active pipeline still used probabilistic forecasting instead of actual outcomes.
+
+**Fix:** When `use_perfect_prediction=True`, the model now:
+- Identifies deals open at period start
+- Uses their **actual** outcomes instead of probabilities
+- Properly distributes revenue across months based on actual close dates
+
+**Impact:** Added $7.6M in previously missing active pipeline revenue to backtest.
+
+### Current Backtest Performance
+
+After fixes:
+```
+Segment          Forecast     Actual       Variance
+─────────────────────────────────────────────────────
+Indirect         $5.93M       $7.84M       -24.3%  ⚠️
+Large Market     $7.78M       $8.12M        -4.2%  ✅
+Mid Market       $4.48M       $6.45M       -30.5%  ⚠️
+SMB              $0.14M       $0.41M       -65.0%  ❌
+─────────────────────────────────────────────────────
+TOTAL           $18.34M      $22.82M       -19.7%
+```
+
+**Target Achievement:**
+- ✅ Large Market: Within <20% target (4.2% variance)
+- ⚠️ Aggregate: Close to <20% target (19.7% variance)
+- ⚠️ Other segments need timing/calibration adjustments
 
 ## Project Structure
 

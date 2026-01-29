@@ -188,7 +188,7 @@ def forecast_active_pipeline(df, stage_probs, staleness, forecast_months, cutoff
 # LAYER 1: FUTURE PIPELINE
 # ======================================================
 
-def forecast_future_pipeline(deals, forecast_start, forecast_end, weight_recent=True):
+def forecast_future_pipeline(deals, forecast_start, forecast_end, weight_recent=True, timing_override=None):
     deals_copy = deals.copy()
     total_months = deals_copy['created_month'].nunique()
     
@@ -203,24 +203,27 @@ def forecast_future_pipeline(deals, forecast_start, forecast_end, weight_recent=
     baseline = deals_copy.groupby('market_segment').apply(
         lambda x: pd.Series({
             'deal_count': x['volume_weight'].sum(),
-            'weighted_revenue': (x['net_revenue'] * x['weight']).sum(),
+            'won_weighted_revenue': (x[x['won']]['net_revenue'] * x[x['won']]['weight']).sum(),
             'weighted_wins': (x['won'].astype(float) * x['weight']).sum(),
             'total_weight': x['weight'].sum()
         })
     ).reset_index()
     
     baseline['avg_monthly_vol'] = baseline['deal_count'] / total_months
-    baseline['avg_size'] = baseline['weighted_revenue'] / baseline['total_weight']
+    baseline['avg_size'] = baseline['won_weighted_revenue'] / baseline['weighted_wins']  # Fixed: only won deals
     baseline['win_rate'] = baseline['weighted_wins'] / baseline['total_weight']
     
-    # Calculate timing distribution from won deals  
-    won_deals = deals[deals['won'] & deals['date_closed'].notna()].copy()
-    won_deals['months_to_close'] = ((won_deals['date_closed'] - won_deals['date_created']).dt.days / 30).clip(lower=0, upper=11).round().astype(int)
-    
-    timing_dist = won_deals.groupby(['market_segment', 'months_to_close']).size().reset_index(name='count')
-    timing_totals = timing_dist.groupby('market_segment')['count'].sum().reset_index(name='total')
-    timing_dist = timing_dist.merge(timing_totals, on='market_segment')
-    timing_dist['pct'] = timing_dist['count'] / timing_dist['total']
+    # Calculate timing distribution from won deals (or use override if provided)
+    if timing_override is not None:
+        timing_dist = timing_override
+    else:
+        won_deals = deals[deals['won'] & deals['date_closed'].notna()].copy()
+        won_deals['months_to_close'] = ((won_deals['date_closed'] - won_deals['date_created']).dt.days / 30).clip(lower=0, upper=11).round().astype(int)
+        
+        timing_dist = won_deals.groupby(['market_segment', 'months_to_close']).size().reset_index(name='count')
+        timing_totals = timing_dist.groupby('market_segment')['count'].sum().reset_index(name='total')
+        timing_dist = timing_dist.merge(timing_totals, on='market_segment')
+        timing_dist['pct'] = timing_dist['count'] / timing_dist['total']
     
     forecast_months = pd.period_range(forecast_start, forecast_end, freq='M')
     creation_months = pd.period_range(forecast_start, forecast_end, freq='M')
@@ -289,16 +292,16 @@ def calculate_actual_segment_metrics(deals, start_date, end_date):
     baseline = period_deals.groupby('market_segment').apply(
         lambda x: pd.Series({
             'deal_count': x['volume_weight'].sum(),
-            'revenue': x['net_revenue'].sum(),
-            'wins': x['won'].sum(),
+            'won_revenue': x[x['won']]['net_revenue'].sum(),
+            'won_deals': x['won'].sum(),
             'total_deals': len(x),
             'months': x['created_month'].nunique()
         })
     ).reset_index()
     
     baseline['avg_monthly_vol'] = baseline['deal_count'] / baseline['months']
-    baseline['avg_size'] = baseline['revenue'] / baseline['deal_count']
-    baseline['win_rate'] = baseline['wins'] / baseline['total_deals']
+    baseline['avg_size'] = baseline['won_revenue'] / baseline['won_deals']  # Fixed: only won deals
+    baseline['win_rate'] = baseline['won_deals'] / baseline['total_deals']
     
     return baseline
 
@@ -326,6 +329,9 @@ def run_backtest(snapshots, use_perfect_prediction=False):
     # Store original levers before any modifications
     import copy
     original_levers = copy.deepcopy(SCENARIO_LEVERS)
+    
+    # Variable to hold timing override for perfect prediction
+    timing_override_2025 = None
     
     # If perfect prediction mode, calculate actual 2025 metrics per segment
     if use_perfect_prediction:
@@ -366,12 +372,68 @@ def run_backtest(snapshots, use_perfect_prediction=False):
             SCENARIO_LEVERS[segment]['deal_size_multiplier'] = size_mult
             
             print(f"  {segment}: vol={vol_mult:.2f}x, wr={wr_mult:.2f}x, size={size_mult:.2f}x")
+        
+        # Calculate actual 2025 timing distribution
+        won_2025 = deals_created_2025[deals_created_2025['won'] & deals_created_2025['date_closed'].notna()].copy()
+        if len(won_2025) > 0:
+            won_2025['months_to_close'] = ((won_2025['date_closed'] - won_2025['date_created']).dt.days / 30).clip(lower=0, upper=11).round().astype(int)
+            timing_override_2025 = won_2025.groupby(['market_segment', 'months_to_close']).size().reset_index(name='count')
+            timing_totals = timing_override_2025.groupby('market_segment')['count'].sum().reset_index(name='total')
+            timing_override_2025 = timing_override_2025.merge(timing_totals, on='market_segment')
+            timing_override_2025['pct'] = timing_override_2025['count'] / timing_override_2025['total']
+            print("\n[Using actual 2025 timing distribution]")
     
     # Build 2025 probabilities from actual 2025 exits
     stage_probs_2025 = build_stage_probabilities(
         snapshots[(snapshots['date_snapshot'] >= backtest_cutoff) & (snapshots['date_snapshot'] <= backtest_end)],
         weight_recent=False
     )
+    
+    # In perfect prediction mode, override with actual conversion rates for deals open at start of year
+    if use_perfect_prediction:
+        # Get deals that were open at start of 2025
+        last_2024 = snapshots[snapshots['date_snapshot'] < backtest_cutoff]['date_snapshot'].max()
+        open_2024_ids = snapshots[
+            (snapshots['date_snapshot'] == last_2024) &
+            (~snapshots['stage'].isin(['Closed Won', 'Verbal', 'Closed Lost']))
+        ]['deal_id'].unique()
+        
+        # Check which ones actually won in 2025
+        final_2025 = snapshots[snapshots['date_snapshot'] == backtest_end]
+        open_2024_outcomes = final_2025[
+            (final_2025['deal_id'].isin(open_2024_ids)) &
+            (final_2025['date_closed'] >= backtest_cutoff) &
+            (final_2025['date_closed'] <= backtest_end) &
+            (final_2025['date_closed'].notna())
+        ].copy()
+        
+        # Calculate actual conversion rates by segment and stage
+        if len(open_2024_outcomes) > 0:
+            # Get stage for each deal as of end of 2024
+            open_2024_stage = snapshots[
+                (snapshots['date_snapshot'] == last_2024) &
+                (snapshots['deal_id'].isin(open_2024_ids))
+            ][['deal_id', 'market_segment', 'stage']].copy()
+            
+            # Merge with outcomes
+            conversion = open_2024_stage.merge(
+                open_2024_outcomes[['deal_id', 'stage']].rename(columns={'stage': 'final_stage'}),
+                on='deal_id',
+                how='left'
+            )
+            conversion['won'] = conversion['final_stage'].isin(['Closed Won', 'Verbal'])
+            
+            # Calculate actual conversion rates
+            actual_conv = conversion.groupby(['market_segment', 'stage']).agg(
+                wins=('won', 'sum'),
+                total=('deal_id', 'count')
+            ).reset_index()
+            actual_conv['prob'] = (actual_conv['wins'] / actual_conv['total']).clip(upper=1.0)
+            
+            # Override stage probabilities
+            stage_probs_2025 = actual_conv[['market_segment', 'stage', 'prob']]
+            print(f"\n[Using actual active pipeline conversion rates: {len(open_2024_outcomes)} deals won from {len(open_2024_ids)} open deals]")
+    
     staleness = build_staleness_thresholds(actual_full_data)
     
     # Historical data for active pipeline (deals open at start of 2025)
@@ -379,16 +441,53 @@ def run_backtest(snapshots, use_perfect_prediction=False):
     
     forecast_months = pd.period_range(BACKTEST_DATE, BACKTEST_THROUGH, freq='M')
     
-    # Active pipeline forecast - use historical data with 2025 stage probs
-    active = forecast_active_pipeline(
-        historical_data, stage_probs_2025, staleness,
-        [m.to_timestamp() for m in forecast_months],
-        cutoff_date=backtest_cutoff - pd.Timedelta(days=1)
-    )
+    # Active pipeline forecast
+    if use_perfect_prediction:
+        # In perfect prediction mode, use ACTUAL outcomes for active pipeline
+        # Use the same logic as actuals - deals that were open (not fully closed) at start
+        last_2024 = snapshots[snapshots['date_snapshot'] < backtest_cutoff]['date_snapshot'].max()
+        open_at_start_ids = snapshots[
+            (snapshots['date_snapshot'] == last_2024) &
+            (~snapshots['is_closed'])
+        ]['deal_id'].unique()
+        
+        # Get the actual deals that won from this group
+        actuals_from_pipeline_active = actual_deals[
+            (actual_deals['deal_id'].isin(open_at_start_ids)) &
+            (actual_deals['won']) &
+            (actual_deals['date_closed'] >= backtest_cutoff) &
+            (actual_deals['date_closed'] <= backtest_end) &
+            (actual_deals['date_closed'].notna())
+        ].copy()
+        
+        if len(actuals_from_pipeline_active) > 0:
+            actuals_from_pipeline_active['month'] = actuals_from_pipeline_active['date_closed'].dt.to_period('M').dt.to_timestamp()
+            active = actuals_from_pipeline_active.groupby(['month', 'market_segment']).agg(
+                expected_revenue=('net_revenue', 'sum'),
+                expected_count=('deal_id', 'count')
+            ).reset_index()
+            print(f"\n[Active pipeline: Using actual outcomes - {len(actuals_from_pipeline_active)} deals won, ${actuals_from_pipeline_active['net_revenue'].sum():,.0f}]")
+        else:
+            active = pd.DataFrame(columns=['month', 'market_segment', 'expected_revenue', 'expected_count'])
+            print("\n[Active pipeline: No deals won from open pipeline]")
+    else:
+        # Standard forecast using probabilities
+        active = forecast_active_pipeline(
+            historical_data, stage_probs_2025, staleness,
+            [m.to_timestamp() for m in forecast_months],
+            cutoff_date=backtest_cutoff - pd.Timedelta(days=1)
+        )
     
     # FIX: Future pipeline forecast must use HISTORICAL deals as baseline
     # The multipliers will adjust the historical baseline to match 2025 actuals
-    future = forecast_future_pipeline(historical_deals, BACKTEST_DATE, BACKTEST_THROUGH, weight_recent=False)
+    # Pass timing override if in perfect prediction mode
+    future = forecast_future_pipeline(
+        historical_deals, 
+        BACKTEST_DATE, 
+        BACKTEST_THROUGH, 
+        weight_recent=False,
+        timing_override=timing_override_2025
+    )
     
     # Combine
     all_parts = [active, future]
@@ -399,17 +498,43 @@ def run_backtest(snapshots, use_perfect_prediction=False):
     else:
         forecast = pd.DataFrame(columns=['month', 'market_segment', 'expected_revenue', 'expected_count'])
     
-    # Actuals - Use FINAL status from last available snapshot in the period
+    # Actuals - Use the same logic as forecast
+    # 1. Deals created during forecast period (from future pipeline)
+    # 2. Deals that were open at start and won during period (from active pipeline)
     last_snapshot_date = snapshots[snapshots['date_snapshot'] <= backtest_end]['date_snapshot'].max()
     last_snapshot = snapshots[snapshots['date_snapshot'] == last_snapshot_date]
-    won_in_final = last_snapshot[last_snapshot['stage'].isin(['Closed Won', 'Verbal'])].copy()
-    won_in_final = won_in_final[
-        (won_in_final['date_closed'] >= backtest_cutoff) &
-        (won_in_final['date_closed'] <= backtest_end) &
-        (won_in_final['date_closed'].notna())
-    ]
     
-    actuals = won_in_final[['deal_id', 'market_segment', 'net_revenue', 'date_closed']].copy()
+    # Get deals created during forecast period that won
+    actuals_from_created = actual_deals[
+        (actual_deals['date_created'] >= backtest_cutoff) &
+        (actual_deals['date_created'] <= backtest_end) &
+        (actual_deals['won']) &
+        (actual_deals['date_closed'] >= backtest_cutoff) &
+        (actual_deals['date_closed'] <= backtest_end) &
+        (actual_deals['date_closed'].notna())
+    ].copy()
+    
+    # Get deals that were open at start and won during period  
+    last_2024 = snapshots[snapshots['date_snapshot'] < backtest_cutoff]['date_snapshot'].max()
+    open_at_start = snapshots[
+        (snapshots['date_snapshot'] == last_2024) &
+        (~snapshots['is_closed'])
+    ]['deal_id'].unique()
+    
+    actuals_from_pipeline = actual_deals[
+        (actual_deals['deal_id'].isin(open_at_start)) &
+        (actual_deals['won']) &
+        (actual_deals['date_closed'] >= backtest_cutoff) &
+        (actual_deals['date_closed'] <= backtest_end) &
+        (actual_deals['date_closed'].notna())
+    ].copy()
+    
+    # Combine both sources
+    all_actual_ids = list(actuals_from_created['deal_id']) + list(actuals_from_pipeline['deal_id'])
+    actuals = actual_deals[actual_deals['deal_id'].isin(all_actual_ids)][['deal_id', 'market_segment', 'net_revenue', 'date_closed']].copy()
+    
+    print(f"\n[Actuals: {len(actuals_from_created)} from newly created deals (${actuals_from_created['net_revenue'].sum():,.0f}), " +
+          f"{len(actuals_from_pipeline)} from active pipeline (${actuals_from_pipeline['net_revenue'].sum():,.0f})]")
     
     actuals['close_month'] = actuals['date_closed'].dt.to_period('M').dt.to_timestamp()
     
