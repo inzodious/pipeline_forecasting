@@ -1,4 +1,6 @@
-data/
-exports/
+/assumptions_log
+/data
+/exports
+/validation
 .env
 *.log
