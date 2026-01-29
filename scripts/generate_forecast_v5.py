@@ -23,11 +23,35 @@ ACTUALS_THROUGH = '2025-12-26'
 RUN_BACKTEST = True
 BACKTEST_DATE = '2025-01-01'
 BACKTEST_THROUGH = '2025-12-31'
+BACKTEST_PERFECT_PREDICTION = True  # Use actual 2025 segment metrics as levers for validation
 
+# Segment-specific scenario levers
 SCENARIO_LEVERS = {
-    'volume_multiplier': 1.0,
-    'win_rate_multiplier': 1.0,
-    'deal_size_multiplier': 1.0
+    'Indirect': {
+        'volume_multiplier': 1.0,
+        'win_rate_multiplier': 1.0,
+        'deal_size_multiplier': 1.0
+    },
+    'Large Market': {
+        'volume_multiplier': 1.0,
+        'win_rate_multiplier': 1.0,
+        'deal_size_multiplier': 1.0
+    },
+    'Mid Market': {
+        'volume_multiplier': 1.0,
+        'win_rate_multiplier': 1.0,
+        'deal_size_multiplier': 1.0
+    },
+    'SMB': {
+        'volume_multiplier': 1.0,
+        'win_rate_multiplier': 1.0,
+        'deal_size_multiplier': 1.0
+    },
+    'Other': {
+        'volume_multiplier': 1.0,
+        'win_rate_multiplier': 1.0,
+        'deal_size_multiplier': 1.0
+    }
 }
 
 RUN_GOAL_SEEK = True
@@ -206,9 +230,17 @@ def forecast_future_pipeline(deals, forecast_start, forecast_end, weight_recent=
     for m_created in creation_months:
         for _, r in baseline.iterrows():
             segment = r['market_segment']
-            vol = r['avg_monthly_vol'] * SCENARIO_LEVERS['volume_multiplier']
-            size = r['avg_size'] * SCENARIO_LEVERS['deal_size_multiplier']
-            win_rate = r['win_rate'] * SCENARIO_LEVERS['win_rate_multiplier']
+            
+            # Get segment-specific levers (default to 1.0 if segment not found)
+            segment_levers = SCENARIO_LEVERS.get(segment, {
+                'volume_multiplier': 1.0,
+                'win_rate_multiplier': 1.0,
+                'deal_size_multiplier': 1.0
+            })
+            
+            vol = r['avg_monthly_vol'] * segment_levers['volume_multiplier']
+            size = r['avg_size'] * segment_levers['deal_size_multiplier']
+            win_rate = r['win_rate'] * segment_levers['win_rate_multiplier']
             win_rate = min(win_rate, 1.0)
             
             segment_timing = timing_dist[timing_dist['market_segment'] == segment]
@@ -247,9 +279,32 @@ def forecast_future_pipeline(deals, forecast_start, forecast_end, weight_recent=
 # BACKTEST
 # ======================================================
 
-def run_backtest(snapshots):
+def calculate_actual_segment_metrics(deals, start_date, end_date):
+    """Calculate actual metrics per segment for perfect prediction in backtest"""
+    period_deals = deals[
+        (deals['date_created'] >= pd.to_datetime(start_date)) &
+        (deals['date_created'] <= pd.to_datetime(end_date))
+    ].copy()
+    
+    baseline = period_deals.groupby('market_segment').apply(
+        lambda x: pd.Series({
+            'deal_count': x['volume_weight'].sum(),
+            'revenue': x['net_revenue'].sum(),
+            'wins': x['won'].sum(),
+            'total_deals': len(x),
+            'months': x['created_month'].nunique()
+        })
+    ).reset_index()
+    
+    baseline['avg_monthly_vol'] = baseline['deal_count'] / baseline['months']
+    baseline['avg_size'] = baseline['revenue'] / baseline['deal_count']
+    baseline['win_rate'] = baseline['wins'] / baseline['total_deals']
+    
+    return baseline
+
+def run_backtest(snapshots, use_perfect_prediction=False):
     print(f"\n{'='*60}")
-    print(f"BACKTEST")
+    print(f"BACKTEST {'(PERFECT PREDICTION MODE)' if use_perfect_prediction else ''}")
     print(f"{'='*60}")
     
     backtest_cutoff = pd.to_datetime(BACKTEST_DATE)
@@ -259,11 +314,58 @@ def run_backtest(snapshots):
     actual_full_data = snapshots[snapshots['date_snapshot'] <= backtest_end].copy()
     actual_deals = build_deal_facts(actual_full_data)
     
-    # Get 2025 created deals for future pipeline metrics
+    # Get historical deals (pre-2025) for baseline calculation
+    historical_deals = actual_deals[actual_deals['date_created'] < backtest_cutoff].copy()
+    
+    # Get 2025 created deals for metrics calculation
     deals_created_2025 = actual_deals[
         (actual_deals['date_created'] >= backtest_cutoff) &
         (actual_deals['date_created'] <= backtest_end)
     ].copy()
+    
+    # Store original levers before any modifications
+    import copy
+    original_levers = copy.deepcopy(SCENARIO_LEVERS)
+    
+    # If perfect prediction mode, calculate actual 2025 metrics per segment
+    if use_perfect_prediction:
+        print("\n[Using actual 2025 segment metrics as scenario levers]")
+        
+        # Calculate 2025 metrics
+        metrics_2025 = calculate_actual_segment_metrics(deals_created_2025, backtest_cutoff, backtest_end)
+        
+        # Calculate historical baseline metrics
+        if len(historical_deals) > 0:
+            historical_metrics = calculate_actual_segment_metrics(
+                historical_deals, 
+                historical_deals['date_created'].min(), 
+                backtest_cutoff - pd.Timedelta(days=1)
+            )
+        else:
+            historical_metrics = pd.DataFrame()
+        
+        # Calculate and apply segment-specific multipliers
+        for segment in metrics_2025['market_segment']:
+            act = metrics_2025[metrics_2025['market_segment'] == segment].iloc[0]
+            hist = historical_metrics[historical_metrics['market_segment'] == segment]
+            
+            if len(hist) > 0:
+                hist = hist.iloc[0]
+                vol_mult = act['avg_monthly_vol'] / hist['avg_monthly_vol'] if hist['avg_monthly_vol'] > 0 else 1.0
+                wr_mult = act['win_rate'] / hist['win_rate'] if hist['win_rate'] > 0 else 1.0
+                size_mult = act['avg_size'] / hist['avg_size'] if hist['avg_size'] > 0 else 1.0
+            else:
+                vol_mult, wr_mult, size_mult = 1.0, 1.0, 1.0
+            
+            # Apply to SCENARIO_LEVERS temporarily
+            if segment not in SCENARIO_LEVERS:
+                SCENARIO_LEVERS[segment] = {}
+            
+            SCENARIO_LEVERS[segment]['volume_multiplier'] = vol_mult
+            SCENARIO_LEVERS[segment]['win_rate_multiplier'] = wr_mult
+            SCENARIO_LEVERS[segment]['deal_size_multiplier'] = size_mult
+            
+            print(f"  {segment}: vol={vol_mult:.2f}x, wr={wr_mult:.2f}x, size={size_mult:.2f}x")
     
     # Build 2025 probabilities from actual 2025 exits
     stage_probs_2025 = build_stage_probabilities(
@@ -277,15 +379,16 @@ def run_backtest(snapshots):
     
     forecast_months = pd.period_range(BACKTEST_DATE, BACKTEST_THROUGH, freq='M')
     
-    # Active pipeline forecast
+    # Active pipeline forecast - use historical data with 2025 stage probs
     active = forecast_active_pipeline(
         historical_data, stage_probs_2025, staleness,
         [m.to_timestamp() for m in forecast_months],
         cutoff_date=backtest_cutoff - pd.Timedelta(days=1)
     )
     
-    # Future pipeline forecast using actual 2025 creation metrics
-    future = forecast_future_pipeline(deals_created_2025, BACKTEST_DATE, BACKTEST_THROUGH, weight_recent=False)
+    # FIX: Future pipeline forecast must use HISTORICAL deals as baseline
+    # The multipliers will adjust the historical baseline to match 2025 actuals
+    future = forecast_future_pipeline(historical_deals, BACKTEST_DATE, BACKTEST_THROUGH, weight_recent=False)
     
     # Combine
     all_parts = [active, future]
@@ -349,6 +452,12 @@ def run_backtest(snapshots):
     ).fillna(0)
     
     monthly.to_csv(f'{VALIDATION_DIR}/backtest_monthly.csv', index=False)
+    
+    # Restore original levers if they were modified
+    if use_perfect_prediction:
+        SCENARIO_LEVERS.clear()
+        SCENARIO_LEVERS.update(original_levers)
+        print("\n[Restored original scenario levers for FY26 forecast]")
     
     return comparison
 
@@ -514,7 +623,7 @@ def run_forecast():
     export_assumptions(deals, snapshots)
     
     if RUN_BACKTEST:
-        run_backtest(snapshots)
+        run_backtest(snapshots, use_perfect_prediction=BACKTEST_PERFECT_PREDICTION)
     
     print(f"\n{'='*60}")
     print(f"FY26 FORECAST")
