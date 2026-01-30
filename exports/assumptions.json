@@ -1,0 +1,48 @@
+{
+    "VOLUME_BASELINE": "ALL_TIME",
+    "VOLUME_BASELINE_BY_SEGMENT": {},
+    "SCENARIO_LEVERS": {
+        "Indirect": {
+            "volume_multiplier": 1.0,
+            "win_rate_multiplier": 1.0,
+            "deal_size_multiplier": 1.0
+        },
+        "Large Market": {
+            "volume_multiplier": 1.0,
+            "win_rate_multiplier": 1.0,
+            "deal_size_multiplier": 1.0
+        },
+        "Mid Market": {
+            "volume_multiplier": 1.0,
+            "win_rate_multiplier": 1.0,
+            "deal_size_multiplier": 1.0
+        },
+        "SMB": {
+            "volume_multiplier": 1.0,
+            "win_rate_multiplier": 1.0,
+            "deal_size_multiplier": 1.0
+        },
+        "Other": {
+            "volume_multiplier": 1.0,
+            "win_rate_multiplier": 1.0,
+            "deal_size_multiplier": 1.0
+        }
+    },
+    "STALENESS_K_BY_SEGMENT": {
+        "Large Market": 0.1,
+        "Mid Market": 0.25,
+        "Indirect": 0.25,
+        "SMB": 0.5,
+        "Other": 0.3
+    },
+    "DEFAULT_STALENESS_K": 0.25,
+    "DEFAULT_DAYS_REMAINING": 90,
+    "SKIPPER_WEIGHT": 0.5,
+    "CREDIBILITY_THRESHOLD": 50,
+    "WIN_RATE_T12_WEIGHT": 0.55,
+    "DEAL_SIZE_T12_WEIGHT": 0.55,
+    "MIN_WINS_FOR_T12_SIZE": 15,
+    "FORECAST_START": "2026-01-01",
+    "FORECAST_END": "2026-12-31",
+    "ACTUALS_THROUGH": "2025-12-26"
+}

@@ -1,4 +1,4 @@
-# Pipeline Forecasting Model V6
+# Pipeline Forecasting Model (V10)
 
 ## Overview
 This project implements a **Two-Layer Hybrid Forecasting Model** combining cohort-based vintage analysis (Layer 1) with stage-weighted probability modeling (Layer 2) to forecast closed won revenue for 2026. The model is designed to handle sparse data in high-value segments (Large Market) by blending historical and recent performance metrics to produce a stable, defensible forecast.
@@ -8,116 +8,204 @@ This project implements a **Two-Layer Hybrid Forecasting Model** combining cohor
 pipeline_forecasting/
 ├── data/
 │   ├── fact_snapshots.csv          # Primary data: weekly snapshots of all deals
-│   └── sample_data_pivoted.csv     # Excel pivot for validation
+│   └── 20251226_sample_summary.csv  # Sample/supplementary data
+├── docs/
+│   ├── forecasting_guidelines.md   # Methodology & data context
+│   ├── forecast_model_validation.md # Validation notes (Verbal=Won, backtest)
+│   └── Pipeline_Forecasting_Model_V6.pptx
 ├── scripts/
-│   ├── generate_forecast_v6.py     # Main forecast generator (Production)
-│   ├── check_multipliers.py        # Diagnostic: Backtest multiplier validation
-│   ├── check_timing.py             # Diagnostic: Timing distribution analysis
-│   └── diagnose_backtest.py        # Diagnostic: Backtest variance deep dive
+│   ├── generate_forecast_v10.py    # Main forecast generator (Production)
+│   ├── validation/
+│   │   └── data_exploration.py     # Assumptions export → assumptions_log
+│   └── archive/
+│       ├── generate_forecast_v9.py # Previous version
+│       ├── generate_forecast_v8.py
+│       ├── generate_forecast_v7.py
+│       ├── generate_forecast_v6.py
+│       └── generate_forecast_v4.py
 ├── exports/
 │   ├── forecast_2026.csv           # Monthly FY26 forecast output
-│   ├── assumptions.json            # Scenario lever settings
-│   └── goal_seek_analysis.csv      # What-if scenarios for targets
+│   ├── assumptions.json            # Config snapshot for auditability
+│   └── goal_seek_analysis.csv      # What-if levers for revenue targets
 ├── validation/
-│   ├── backtest_results.csv        # Segment-level variance summary
-│   └── backtest_monthly.csv        # Month-by-month backtest detail
-├── assumptions_log/
-│   ├── volume_by_month.csv         # Historical deal creation trends
-│   ├── win_rates_by_month.csv      # Historical win rates by cohort
-│   ├── deal_size_by_month.csv      # Historical deal size trends
-│   └── win_rates_by_stage.csv      # Stage-level probabilities
+│   ├── backtest_results.csv        # Segment-level backtest vs actuals
+│   └── backtest_monthly.csv        # Monthly backtest breakdown
+├── assumptions_log/                # Historical assumptions by month/segment
+│   ├── volume_by_month.csv
+│   ├── win_rates_by_month.csv
+│   └── deal_size_by_month.csv
 ├── README.md                        # This file
-└── forecasting_guidelines.md        # Methodology details
+└── .gitignore
 ```
+
+Methodology details and validation notes live in `docs/`.
 
 ## Dependencies
 - **Python 3.8+**
 - **pandas**: Data manipulation and aggregation
 - **numpy**: Numerical operations (weighting, decay curves)
 
-To run the forecast:
+To run the forecast (from project root):
 ```bash
-python scripts/generate_forecast_v6.py
+python scripts/generate_forecast_v10.py
 ```
+
+## Historical Interpretation (What We Use)
+The model interprets history as follows; see `docs/forecasting_guidelines.md` for full context.
+
+| Metric | Interpretation |
+|--------|----------------|
+| **Win Rates** | **% of Won Revenue / Total Pipeline Revenue** (same denominator as volume; `volume_weight` applied so skippers are half-weighted). |
+| **Volume Creation** | Configurable baseline (see below) with **skipper logic**: deals that first appear as Closed Lost get `volume_weight = 0.5`. |
+| **Sales Cycle & Seasonality** | **Months-to-close** distribution by segment (when new deals close); **monthly volume seasonality** from all-time creation by month. |
+| **Starting Open Pipeline** | Deals **not** closed as of the last snapshot on or before `ACTUALS_THROUGH` (e.g. 2025-12-26); stage probabilities use **stage before exit** (per guidelines). |
 
 ## Methodology & Architecture
 
 ### Layer 1: Future Pipeline (The "When")
 Forecasts revenue from deals **not yet created** in 2026.
-- **Base Logic**: Uses T12M average monthly deal creation volume, win rates, and average deal size.
-- **Stability Anchors**: 
-  - If 2025 volume dropped >30% vs. all-time history, the model anchors to a 50/50 blend of T12M and All-Time volume.
-  - Deal size uses a weighted average but reverts to all-time averages if the T12M sample size is small (<15 wins).
-- **Timing**: Uses a blended distribution (50% All-Time / 50% Recent) to project when new deals will close.
+
+- **Volume Baseline** (configurable via `VOLUME_BASELINE`):
+  - `T12` — Trailing 12-month average (conservative)
+  - `ALL_TIME` — All-time monthly average
+  - `BLENDED` — 50/50 blend of T12 and All-Time (default, balances recency and stability)
+  - `CAPACITY` — 65% peak + 35% T12 (aggressive, for capacity-based planning)
+  
+- **30% Drop Anchor**: Regardless of chosen baseline, if T12 drops >30% vs all-time, the model automatically uses a 50/50 blend to prevent over-pessimism.
+
+- **Win Rate**: Revenue-based (Won Revenue / Total Pipeline Revenue), blended 55% T12 + 45% All-Time.
+
+- **Deal Size**: Blended 55% T12 + 45% All-Time, with reversion to all-time if T12 wins < 15.
+
+- **Timing**: Uses segment-specific months-to-close distribution from historical wins.
 
 ### Layer 2: Active Pipeline (The "How Much")
 Forecasts revenue from deals **currently open** as of year-end 2025.
-- **Base Logic**: Assigns probability based on the deal's current stage.
-- **Blended Probabilities**: Uses a "Credibility Weighting" mechanism. If a segment/stage combo has <50 observed exits, it blends the segment-specific win rate with a global stage average to prevent unrealistic zero-probabilities.
-- **Decay**: Applies a "Staleness Penalty" (0.8x) to deals older than the 95th percentile duration.
-- **Timing**: Large Market deals use a flat 12-month distribution to reflect long sales cycles; other segments use a front-loaded decay.
 
-## Drivers
-The forecast is driven by three primary levers:
-1. **Volume Multiplier**: Adjusts the expected number of new deals created.
-2. **Win Rate Multiplier**: Adjusts the conversion rate from creation to closed won.
-3. **Deal Size Multiplier**: Adjusts the average net revenue per deal.
+- **Stage Probabilities**: Uses the **stage before exit** (Qualified, Alignment, Solutioning), not the closure stage (Closed Won/Lost). This ensures open deals in working stages get non-zero probabilities.
+- **Credibility Weighting**: If a segment/stage combo has <50 observed exits, it blends the segment-specific win rate with a global stage average.
+- **Time-to-Close (V10)**: Computes average days remaining to close per `(market_segment, stage)` from historical snapshots. Each open deal gets an `expected_close_date = snapshot_date + avg_days_remaining`. Revenue is placed in the month containing the expected close date (no decay over months). This fixes the v9 issue where harmonic decay pulled revenue forward from early-stage deals.
+- **Staleness Decay (V10)**: Uses segment-specific **sigmoid decay** instead of binary 0.8× penalty:
+  - Formula: `staleness_factor = 1 / (1 + exp(k × (age_weeks - threshold)))`
+  - **Large Market**: k=0.1 (slow decay, long cycles)
+  - **SMB**: k=0.5 (fast decay, stale deals likely dead)
+  - **Mid Market/Indirect**: k=0.25 (moderate)
+  - Threshold remains 95th percentile age per (segment, stage)
 
-These drivers are applied at the **segment level** in `SCENARIO_LEVERS` within `scripts/generate_forecast_v6.py`.
+## Parameters
 
-## Inputs/Levers/Metrics
+All configuration is centralized at the top of `scripts/generate_forecast_v10.py`:
 
-### Current Scenario: Growth Recovery (Scenario B)
-Assumes a recovery in deal volume and conversion efficiency for 2026.
+### Volume Baseline
+```python
+VOLUME_BASELINE = 'BLENDED'  # Options: 'T12', 'ALL_TIME', 'BLENDED', 'CAPACITY'
 
-| Segment | Volume | Win Rate | Deal Size |
-|---------|--------|----------|-----------|
-| **Indirect** | 1.4x | 1.2x | 1.1x |
-| **Large Market** | 1.8x | 1.4x | 1.2x |
-| **Mid Market** | 1.4x | 1.2x | 1.0x |
-| **SMB** | 1.4x | 1.1x | 1.0x |
-| **Other** | 1.0x | 1.0x | 1.0x |
+# Optional segment-specific overrides
+VOLUME_BASELINE_BY_SEGMENT = {
+    # 'Large Market': 'CAPACITY',  # Example: use capacity for Large Market only
+}
+```
 
-### Key Metrics
-- **Skipper Weight (0.5)**: Penalty for deals that jump straight to "Closed Lost" without working stages.
-- **Staleness Penalty (0.8)**: Probability reduction for deals exceeding 95th percentile age.
-- **Credibility Threshold (50)**: Minimum sample size required to use pure segment-specific win rates.
+**Calibration Results (with 1.0 levers):**
 
-## Forecast Summary
-**Total Forecasted Revenue (FY26):** ~$19.63M
+| Baseline | FY26 Forecast | Backtest Variance | Use Case |
+|----------|---------------|-------------------|----------|
+| `BLENDED` | ~$14.5M | -22.3% vs actuals | **Default**: Conservative, defensible baseline |
+| `CAPACITY` | ~$21.6M | +22.4% vs actuals | Growth scenarios, capacity-based planning |
+| `T12` | ~$15.1M | -11.4% vs actuals | Very conservative, recent-only |
+| `ALL_TIME` | ~$13.9M | -33% vs actuals | Historical average baseline |
 
-| Segment | Expected Revenue | Deal Count |
-|---------|------------------|------------|
-| **Large Market** | $9.18M | 31.0 |
-| **Indirect** | $5.75M | 291.6 |
-| **Mid Market** | $4.14M | 158.8 |
-| **SMB** | $0.55M | 116.2 |
-| **Other** | $0.01M | 3.1 |
+**Recommendation**: Use `T12` as the default for conservative, audit-friendly forecasts. Use `CAPACITY` or adjust `SCENARIO_LEVERS` to reach higher targets (~$20-23M).
 
-**YoY Comparison:** The forecast is within **14%** of 2025 actuals ($22.8M), representing a realistic but conservative recovery target.
+### Scenario Levers
+```python
+SCENARIO_LEVERS = {
+    'Indirect':     {'volume_multiplier': 1.0, 'win_rate_multiplier': 1.0, 'deal_size_multiplier': 1.0},
+    'Large Market': {'volume_multiplier': 1.0, 'win_rate_multiplier': 1.0, 'deal_size_multiplier': 1.0},
+    'Mid Market':   {'volume_multiplier': 1.0, 'win_rate_multiplier': 1.0, 'deal_size_multiplier': 1.0},
+    'SMB':          {'volume_multiplier': 1.0, 'win_rate_multiplier': 1.0, 'deal_size_multiplier': 1.0},
+    'Other':        {'volume_multiplier': 1.0, 'win_rate_multiplier': 1.0, 'deal_size_multiplier': 1.0}
+}
+```
 
-## Backtest Summary
-The model was validated by "predicting" 2025 performance using data available as of Jan 1, 2025.
+### Model Parameters
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `STALENESS_K_BY_SEGMENT` | Large Market: 0.1<br>Mid Market: 0.25<br>Indirect: 0.25<br>SMB: 0.5<br>Other: 0.3 | Sigmoid decay rate per segment (higher k = faster decay past threshold) |
+| `DEFAULT_DAYS_REMAINING` | 90 | Fallback days-to-close for (segment, stage) with no history |
+| `SKIPPER_WEIGHT` | 0.5 | Weight for deals that first appear as Closed Lost |
+| `CREDIBILITY_THRESHOLD` | 50 | Minimum sample size for pure segment-specific probabilities |
+| `WIN_RATE_T12_WEIGHT` | 0.55 | Weight for T12 in win rate blend |
+| `DEAL_SIZE_T12_WEIGHT` | 0.55 | Weight for T12 in deal size blend |
+| `MIN_WINS_FOR_T12_SIZE` | 15 | Minimum T12 wins to use T12 avg_size |
 
-| Segment | Forecast (Backtest) | Actuals 2025 | Variance | Status |
-|---------|---------------------|--------------|----------|--------|
-| **Large Market** | $7.78M | $8.12M | -4.2% | ✅ Excellent |
-| **Indirect** | $5.93M | $7.84M | -24.3% | ⚠️ Under |
-| **Mid Market** | $4.48M | $6.45M | -30.5% | ⚠️ Under |
-| **Total** | **$18.34M** | **$22.82M** | **-19.7%** | ✅ Acceptable |
+## Levers
 
-**Note:** Backtest uses "Perfect Prediction Mode" which applies actual 2025 volume/win-rate multipliers to validate the core logic, rather than guessing levers.
+The forecast is driven by three primary levers applied at the **segment level** in `SCENARIO_LEVERS`:
 
-## Further Enhancement Opportunities
-1. **Seasonality Adjustments**: Currently, volume is distributed evenly. Adding quarterly weighting (e.g., Q4 flush) would improve monthly precision.
-2. **Lead Source Attribution**: Differentiating between Marketing-sourced vs. Sales-sourced leads could refine the "Future Pipeline" layer.
-3. **Stage Velocity**: Incorporating time-in-stage velocity metrics could provide a more dynamic "Staleness" penalty.
-4. **Churn Modeling**: For recurring revenue components, adding a churn/contraction layer would move this from "New Business" to "Net Revenue" forecasting.
+1. **Volume Multiplier**: Adjusts the expected number of new deals created
+2. **Win Rate Multiplier**: Adjusts the conversion rate from creation to closed won
+3. **Deal Size Multiplier**: Adjusts the average net revenue per deal
 
-## Versioning/Status/Validation
-- **Version**: 6.0 (January 2026)
-- **Status**: **Production Ready**
-- **Validation**:
-  - Validated against 2025 actuals with <20% aggregate variance.
-  - Logic updated to handle small sample sizes (Large Market) robustly.
-  - "Goal Seek" analysis included to help leadership set targets.
+## Metrics / Drivers
+
+| Metric | Calculation | Notes |
+|--------|-------------|-------|
+| **Win Rate** | Won Revenue / Total Pipeline Revenue | Revenue-weighted; skipper logic applies (0.5× weight) |
+| **Volume Creation** | Configurable baseline (T12, ALL_TIME, BLENDED, CAPACITY) | Skipper deals (first appear as Closed Lost) get 0.5× weight |
+| **Deal Size** | Average net revenue per won deal | Blended 55% T12 + 45% All-Time; reverts to all-time if T12 wins < 15 |
+| **Time-to-Close** | Average days from snapshot to close per (segment, stage) | T12-weighted; used in Layer 2 for expected close dates |
+| **Staleness Factor** | `1 / (1 + exp(k × (age - threshold)))` | Sigmoid decay; k varies by segment (0.1–0.5) |
+
+## Backtesting Overview
+
+The backtest validates the model by "predicting" 2025 using data available as of Jan 1, 2025.
+
+**Model-Only Approach:**
+- **Active Pipeline**: Forecasts deals open at start of 2025 using stage-before-exit probabilities, time-to-close logic, and sigmoid staleness decay
+- **Future Pipeline**: Forecasts deals created in 2025 using historical baseline with a **single reconciliation lever** (volume_multiplier) per segment
+- **No Actuals Substitution**: The forecast is purely model-driven; actual values are only used for comparison, not inserted into the forecast
+
+**Validation Checks:**
+- Probability cap: Ensures no stage probability exceeds 1.0
+- Revenue conservation: Verifies Layer 2 input weighted revenue matches output revenue
+- Snapshot consistency: Detects >30% drops in deal count per snapshot (possible ETL issues)
+
+**Output:**
+- `validation/backtest_results.csv`: Segment-level model_forecast vs actual with variance %
+- `validation/backtest_monthly.csv`: Monthly breakdown for trend analysis
+
+**Interpretation:**
+- The backtest reconciliation lever shows what multiplier would have been needed to match actuals
+- This validates the model structure while documenting the gap between baseline and actual performance
+
+## Goal Seek Overview
+
+When a **revenue target per segment** is set in `GOAL_WON_REVENUE`, the script calculates required levers to hit that number:
+- `required_combined_multiplier`: Total multiplier needed (target / current_forecast)
+- `suggested_volume_mult`, `suggested_win_rate_mult`, `suggested_deal_size_mult`: Cube-root split for even distribution across levers
+
+**Output:** `exports/goal_seek_analysis.csv` (CSV only, no console logging)
+
+**Usage:** Review the required multipliers to assess target feasibility. Update `SCENARIO_LEVERS` to match suggested values if targets are achievable.
+
+## Outputs
+
+| File | Description |
+|------|-------------|
+| `exports/forecast_2026.csv` | Monthly FY26 forecast by segment |
+| `exports/assumptions.json` | Configuration snapshot for auditability |
+| `exports/goal_seek_analysis.csv` | Required levers to hit revenue targets |
+| `validation/backtest_results.csv` | Segment-level backtest vs actuals |
+| `validation/backtest_monthly.csv` | Monthly backtest breakdown |
+| `assumptions_log/*.csv` | Historical volume, win rates, deal size by month/segment |
+
+## Future Upgrade Opportunities
+
+1. **Stock vs Flow Win Rates**: Separate win rates for deals created >6 months ago (stock) vs fresh deals (flow) to capture different conversion dynamics
+2. **Gaussian Spread**: Add optional ±1 month Gaussian distribution around expected close dates to model variance
+3. **PySpark Migration**: Refactor to PySpark for production scale; vectorize remaining iterrows() loops
+4. **Audit Log**: Add per-deal audit trail (deal_id, action, reason, impact) for "why was this deal downgraded?" queries
+5. **Seasonality Adjustments**: Add quarterly weighting (e.g., Q4 flush) for monthly precision
+6. **Lead Source Attribution**: Differentiate Marketing-sourced vs. Sales-sourced leads
+7. **Churn Modeling**: Add churn/contraction layer for "Net Revenue" forecasting

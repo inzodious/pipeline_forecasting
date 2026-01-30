@@ -1,6 +1,9 @@
-#/data
-#/exports
-#/validation
-#/assumptions_log
+# Generated outputs (regenerable by scripts)
+exports/*.csv
+validation/backtest_results.csv
+assumptions_log/*.xlsx
+
 .env
 *.log
+__pycache__/
+*.pyc

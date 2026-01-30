@@ -64,9 +64,9 @@ Deals that first appear directly as **Closed Lost** without ever passing through
 
 ---
 
-## 3. Methodology: “The Vintage-Weighted Hybrid”
+## 3. Methodology: "The Vintage-Weighted Hybrid"
 
-### Layer 1: Cohort-Based Vintage Analysis (The “When”)
+### Layer 1: Cohort-Based Vintage Analysis (The "When")
 
 **Purpose**  
 Addresses the *incomplete cohort problem* and establishes expected timing of deal closure.
@@ -85,7 +85,7 @@ Addresses the *incomplete cohort problem* and establishes expected timing of dea
 
 ---
 
-### Layer 2: Stage-Weighted Probability (The “How Much”)
+### Layer 2: Stage-Weighted Probability (The "How Much")
 
 **Purpose**  
 Provides the operational, deal-level forecast for active pipeline.
@@ -112,12 +112,18 @@ The following inputs must be calculated prior to generating forecasts:
 | Metric | Logic Description |
 |------|-------------------|
 | Vintage Maturity Curve | Cumulative % of total qualified revenue that is closed-won by week of age (t=0 → t=max), segmented by market_segment |
-| Stage Probability | Historical ratio of Closed Won deals to total deals exiting each stage |
+| Stage Probability | Historical ratio of Closed Won deals to total deals **exiting each stage** (use the **stage the deal was in immediately before closure**, not the final Closed Won/Lost stage) |
 | Staleness Threshold | 90th percentile DSO per stage; deals exceeding this age receive a probability penalty |
+
+**Confirmed historical interpretation in this implementation:**
+- **Win Rates**: As **% of Won Revenue / Total Pipeline Revenue** (same denominator as volume; volume_weight applied so skippers are half-weighted).
+- **Volume Creation**: T12M average with **skipper logic** — deals that first appear as Closed Lost receive `volume_weight = 0.5`.
+- **Sales Cycle Averages & Seasonality**: Months-to-close distribution by segment; monthly volume seasonality from all-time creation.
+- **Starting Open Pipeline**: Deals not closed as of the last snapshot on or before the period start (e.g. going into 2026 = open deals as of latest snapshot ≤ ACTUALS_THROUGH).
 
 ---
 
-### 4.2 Handling “Skippers” (Direct-to-Lost)
+### 4.2 Handling "Skippers" (Direct-to-Lost)
 
 In the **Deal Volume** calculation step:
 
@@ -141,7 +147,7 @@ ELSE volume_weight = 1.0
 
 #### Future Pipeline Forecast (Layer 1)
 
-1. Generate synthetic “dummy deals” for **Jan–Dec 2026** based on historical deal volume trends
+1. Generate synthetic "dummy deals" for **Jan–Dec 2026** based on historical deal volume trends
 2. Apply vintage maturity curves to project closure timing
 3. Convert projected wins into monthly expected revenue
 
